@@ -17,6 +17,12 @@ anyhow.workspace = true
 axum.workspace = true
 fetchit-fedi = { path = "../fetchit-fedi" }
 fetchit-relay-proto = { path = "../fetchit-relay-proto" }
+# The signed etchit-io denylist, consumed exactly as the relay-server's
+# fediverse inbox consumes it (crates/fetchit-relay-server/src/inbox/operator.rs).
+# `fetchit-trust-types` is the leaf crate carrying `DenylistQuery` +
+# `canonicalize_url_value`, so the bridge never pulls the trust SERVER stack.
+fetchit-trust-client = { path = "../fetchit-trust-client", features = ["reqwest"] }
+fetchit-trust-types = { path = "../fetchit-trust-types" }
 saorsa-pqc.workspace = true
 sha2.workspace = true
 base64.workspace = true

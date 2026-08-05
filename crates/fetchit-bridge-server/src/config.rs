@@ -65,6 +65,20 @@ pub struct BridgeConfig {
     /// count at deploy (behind a TLS terminator / CDN) so the limiter keys on
     /// the real client IP rather than the proxy's.
     pub trusted_proxy_hops: usize,
+    /// Base URL of the signed community denylist service consumed by the
+    /// inbound federation gate, e.g. `https://trust.etchit.io/v1`.
+    ///
+    /// `None` disables the gate entirely (fail-open: every signed
+    /// delivery is accepted, which is exactly the pre-gate behaviour).
+    /// That is the hermetic setting for tests and for an operator
+    /// running a bridge that answers to no community list; production
+    /// gets [`DEFAULT_DENYLIST_URL`] from
+    /// [`from_env`](Self::from_env).
+    pub denylist_url: Option<String>,
+    /// On-disk directory the denylist consumer persists verified
+    /// manifests under, so a cold offline boot still gates against the
+    /// last good snapshot. `None` keeps the snapshot in memory only.
+    pub denylist_cache: Option<PathBuf>,
 }
 
 /// Does `domain` look like it carries a port? A fediverse domain must be
@@ -75,6 +89,13 @@ pub struct BridgeConfig {
 fn domain_has_port(domain: &str) -> bool {
     domain.contains(':')
 }
+
+/// Default signed-denylist base URL — the live NY-Trust service. Byte
+/// -identical to the relay-server's `DEFAULT_DENYLIST_URL` and the
+/// desktop / Android clients', so every fetch>it component gates against
+/// one list. Override with `FETCHIT_BRIDGE_DENYLIST_URL`; set that var
+/// empty to disable the gate.
+pub const DEFAULT_DENYLIST_URL: &str = "https://trust.etchit.io/v1";
 
 /// A trusted-proxy-hop count above this warns at load: real proxy chains are
 /// 1-3, and a value above the true chain length is the spoofable case.
@@ -117,7 +138,11 @@ impl BridgeConfig {
     /// block in addition to the built-in list),
     /// `FETCHIT_BRIDGE_REGISTER_BURST` (default `10`),
     /// `FETCHIT_BRIDGE_REGISTER_PER_MIN` (default `10`),
-    /// `FETCHIT_BRIDGE_TRUSTED_PROXY_HOPS` (default `0`).
+    /// `FETCHIT_BRIDGE_TRUSTED_PROXY_HOPS` (default `0`),
+    /// `FETCHIT_BRIDGE_DENYLIST_URL` (default [`DEFAULT_DENYLIST_URL`];
+    /// set empty to disable the inbound denylist gate),
+    /// `FETCHIT_BRIDGE_DENYLIST_CACHE` (default unset — no on-disk
+    /// snapshot).
     ///
     /// # Errors
     /// Returns [`BridgeError::Config`] if `FETCHIT_BRIDGE_BIND` is not a
@@ -163,6 +188,23 @@ impl BridgeConfig {
                  the origin is firewalled to the trusted edge."
             );
         }
+        // Secure-by-default: the gate is ON against the production list
+        // unless the operator explicitly empties the variable. An unset
+        // variable must not silently disable moderation on the one
+        // internet-facing surface that terminates federation traffic.
+        let denylist_url = denylist_url_from_env(std::env::var("FETCHIT_BRIDGE_DENYLIST_URL").ok());
+        if denylist_url.is_none() {
+            tracing::warn!(
+                "inbound denylist gate is DISABLED \
+                 (FETCHIT_BRIDGE_DENYLIST_URL is set empty); every \
+                 signature-verified delivery is accepted"
+            );
+        }
+        let denylist_cache = std::env::var("FETCHIT_BRIDGE_DENYLIST_CACHE")
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
         Ok(Self {
             bind,
             domain,
@@ -172,14 +214,35 @@ impl BridgeConfig {
             register_burst,
             register_per_min,
             trusted_proxy_hops,
+            denylist_url,
+            denylist_cache,
         })
+    }
+}
+
+/// Resolve the denylist base from the raw env value: unset falls back to
+/// [`DEFAULT_DENYLIST_URL`], an explicitly empty (or whitespace-only)
+/// value disables the gate, anything else is used verbatim.
+///
+/// Split out so the "empty means off, unset means production" contract
+/// is unit-testable without mutating process environment.
+fn denylist_url_from_env(raw: Option<String>) -> Option<String> {
+    match raw {
+        None => Some(DEFAULT_DENYLIST_URL.to_owned()),
+        Some(v) => {
+            let trimmed = v.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-    use super::{domain_has_port, proxy_hops_suspicious, BridgeConfig};
+    use super::{
+        denylist_url_from_env, domain_has_port, proxy_hops_suspicious, BridgeConfig,
+        DEFAULT_DENYLIST_URL,
+    };
 
     #[test]
     fn bare_host_has_no_port() {
@@ -200,6 +263,33 @@ mod tests {
         assert!(domain_has_port("etchit.io:443"));
         assert!(domain_has_port("etchit.io:8443"));
         assert!(domain_has_port("bridge-origin.etchit.io:8089"));
+    }
+
+    #[test]
+    fn unset_denylist_var_gates_against_production() {
+        // An operator who never heard of the variable still runs the
+        // gate — moderation must not be opt-in on the federation edge.
+        assert_eq!(
+            denylist_url_from_env(None).as_deref(),
+            Some(DEFAULT_DENYLIST_URL),
+        );
+    }
+
+    #[test]
+    fn an_explicitly_empty_denylist_var_disables_the_gate() {
+        // The hermetic / no-community-list setting, and the only way to
+        // turn the gate off.
+        assert_eq!(denylist_url_from_env(Some(String::new())), None);
+        assert_eq!(denylist_url_from_env(Some("   ".to_owned())), None);
+    }
+
+    #[test]
+    fn a_custom_denylist_var_is_used_verbatim_after_trimming() {
+        assert_eq!(
+            denylist_url_from_env(Some("  https://trust.staging.example/v1 ".to_owned()))
+                .as_deref(),
+            Some("https://trust.staging.example/v1"),
+        );
     }
 
     #[test]

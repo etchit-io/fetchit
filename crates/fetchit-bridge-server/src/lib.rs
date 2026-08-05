@@ -9,6 +9,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod denylist;
 pub mod error;
 pub mod metrics;
 pub mod ratelimit;

@@ -15,6 +15,7 @@ pub struct BridgeMetrics {
     actors_registered: AtomicU64,
     webfinger_requests: AtomicU64,
     actor_doc_requests: AtomicU64,
+    inbox_denylisted: AtomicU64,
 }
 
 impl BridgeMetrics {
@@ -27,6 +28,7 @@ impl BridgeMetrics {
             actors_registered: AtomicU64::new(0),
             webfinger_requests: AtomicU64::new(0),
             actor_doc_requests: AtomicU64::new(0),
+            inbox_denylisted: AtomicU64::new(0),
         }
     }
 
@@ -43,6 +45,21 @@ impl BridgeMetrics {
     /// Increment the actor-document-request counter.
     pub fn inc_actor_doc(&self) {
         self.actor_doc_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment the denylisted-inbound-delivery counter — one per
+    /// activity dropped by the community denylist gate. Deliberately
+    /// unlabelled: the actor URL goes to the log line, never to a
+    /// Prometheus label, so a hostile sender cannot inflate metric
+    /// cardinality.
+    pub fn inc_inbox_denylisted(&self) {
+        self.inbox_denylisted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Current denylisted-delivery count, for tests + ops assertions.
+    #[must_use]
+    pub fn inbox_denylisted_count(&self) -> u64 {
+        self.inbox_denylisted.load(Ordering::Relaxed)
     }
 
     /// Render all counters in Prometheus text-exposition format.
@@ -72,6 +89,11 @@ impl BridgeMetrics {
                 "fetchit_bridge_actor_doc_requests_total",
                 "Actor-document GETs served",
                 self.actor_doc_requests.load(Ordering::Relaxed),
+            ),
+            (
+                "fetchit_bridge_inbox_denylisted_total",
+                "Inbound activities dropped by the community denylist",
+                self.inbox_denylisted.load(Ordering::Relaxed),
             ),
         ] {
             let _ = writeln!(out, "# HELP {name} {help}");

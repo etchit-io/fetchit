@@ -115,7 +115,22 @@ pub async fn post_inbox(
         return (StatusCode::UNAUTHORIZED, reason).into_response();
     }
 
-    // Signature verified. Dispatch on activity type.
+    // Signature verified, so `sender.id` is an AUTHENTICATED actor URL
+    // (the key that signed this request is published by that document).
+    // Gate it against the community denylist BEFORE any dispatch arm
+    // runs, which is what puts it before every store write: a moderated
+    // actor's Create, Follow, Accept, Reject and Undo all die here.
+    //
+    // 403 mirrors the relay-server's `DropReason::Denylisted` answer
+    // (`inbox/router.rs`), so a moderated instance sees the same
+    // terminal, non-retryable status from either fetch>it inbox.
+    if crate::denylist::is_blocked_actor(state.denylist.as_ref(), sender.id.as_str()) {
+        state.metrics.inc_inbox_denylisted();
+        tracing::info!(handle, sender = %sender.id, "inbox: denylisted sender dropped");
+        return (StatusCode::FORBIDDEN, "denylisted").into_response();
+    }
+
+    // Dispatch on activity type.
     let activity_type = activity.get("type").and_then(Value::as_str);
     tracing::info!(handle, sender = %sender_actor_url, activity_type, "inbox: verified delivery");
     match activity_type {
