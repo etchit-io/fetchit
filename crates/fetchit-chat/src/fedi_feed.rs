@@ -18,6 +18,18 @@ const FEED_POSTS_PER_ACCOUNT: usize = 10;
 /// Posts returned per refresh after the merge.
 const FEED_TOTAL_CAP: usize = 50;
 
+/// One mention on a feed post: the visible `@user@host` text and the
+/// actor URL behind it. A shell spans the text and opens the profile
+/// for the URL; both are remote-authored, so acting on either re-enters
+/// the gated resolve path ([`crate::fedi_profile`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FediPostMention {
+    /// Mention text as written in the body, e.g. `@alice@mastodon.example`.
+    pub name: String,
+    /// Actor URL the authoring server resolved the mention to.
+    pub href: String,
+}
+
 /// One feed entry, display-ready (text only).
 #[derive(Clone, Debug)]
 pub struct FediFeedPost {
@@ -25,6 +37,10 @@ pub struct FediFeedPost {
     pub author_url: String,
     /// Short author label — `user@host` derived from the actor URL.
     pub author_label: String,
+    /// The author's chosen display name, when their actor document
+    /// publishes one. A row shows this ahead of [`Self::author_label`];
+    /// `None` means fall back to the label.
+    pub author_name: Option<String>,
     /// Post body as plain text (wire HTML reduced).
     pub text: String,
     /// ISO-8601 publish stamp as served (may be empty). UTC ISO-8601
@@ -32,6 +48,13 @@ pub struct FediFeedPost {
     pub published: String,
     /// Link to the post on its home server.
     pub object_url: String,
+    /// `Mention` tags on the post, capped engine-side.
+    pub mentions: Vec<FediPostMention>,
+    /// This device has liked the post
+    /// ([`crate::fedi_like`]). Device state, not a remote count —
+    /// there is no cheap `ActivityPub` source for a like total, so v1
+    /// renders the toggle and no number.
+    pub liked: bool,
 }
 
 /// `user@host` from an actor URL (`https://host/users/user` and
@@ -55,6 +78,22 @@ pub fn author_label(actor_url: &str) -> String {
     }
 }
 
+/// The display name to stamp on a post, given the FOLLOWED account's
+/// actor id + name. An outbox can carry a Note attributed to somebody
+/// else; stamping this account's name onto it would misattribute the
+/// post, so the name rides only on an exact author-id match.
+fn name_for_author(
+    post_author_url: &str,
+    actor_id: &str,
+    actor_name: Option<&str>,
+) -> Option<String> {
+    if post_author_url == actor_id {
+        actor_name.map(str::to_owned)
+    } else {
+        None
+    }
+}
+
 impl Client {
     /// Pull the read feed for our actor `handle`: newest text posts from
     /// followed accounts, merged newest-first. Per-account failures are
@@ -66,6 +105,13 @@ impl Client {
     /// (there is nothing to pull without it).
     pub async fn fetch_fedi_feed(&self, handle: &str, now_ms: u64) -> Result<Vec<FediFeedPost>> {
         let following = self.list_fedi_following(handle, now_ms).await?;
+        // The liked-set is one local read for the whole refresh, joined
+        // per post below. A load failure costs hearts, never the feed.
+        let liked: std::collections::HashSet<String> = self
+            .fedi_liked_posts(handle)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         let mut posts: Vec<FediFeedPost> = Vec::new();
         for entry in following.iter().take(FEED_ACCOUNT_CAP) {
             let Ok(actor_url) = entry.target_actor_url.parse::<url::Url>() else {
@@ -81,6 +127,13 @@ impl Client {
                 &author_label(&entry.target_actor_url),
                 actor.icon_url.as_deref(),
             );
+            // Same free ride for the display name. A Note carries only
+            // `attributedTo` (a URL), so the actor document is the only
+            // place a name is available without a second request — and
+            // it is only this account's name, so it is applied to posts
+            // this account actually authored.
+            let actor_id = actor.id.to_string();
+            let actor_name = actor.name.clone();
             let Some(outbox) = actor.outbox else {
                 continue;
             };
@@ -94,12 +147,23 @@ impl Client {
                 if text.is_empty() {
                     continue;
                 }
+                let author_name = name_for_author(&p.author_url, &actor_id, actor_name.as_deref());
                 posts.push(FediFeedPost {
                     author_label: author_label(&p.author_url),
                     author_url: p.author_url,
+                    author_name,
+                    liked: liked.contains(&p.object_url),
                     text,
                     published: p.published,
                     object_url: p.object_url,
+                    mentions: p
+                        .mentions
+                        .into_iter()
+                        .map(|m| FediPostMention {
+                            name: m.name,
+                            href: m.href,
+                        })
+                        .collect(),
                 });
             }
         }
@@ -126,6 +190,71 @@ mod tests {
             "josh@etchit.io"
         );
         assert_eq!(author_label("not a url"), "not a url");
+    }
+
+    #[test]
+    fn a_display_name_is_only_applied_to_that_actors_own_posts() {
+        let actor_id = "https://m.example/users/g";
+        assert_eq!(
+            name_for_author(actor_id, actor_id, Some("Gargron")),
+            Some("Gargron".to_owned()),
+        );
+        // A boosted / relayed Note attributed elsewhere must NOT wear
+        // the followed account's name.
+        assert_eq!(
+            name_for_author(
+                "https://elsewhere.example/users/x",
+                actor_id,
+                Some("Gargron")
+            ),
+            None,
+        );
+        // An account that publishes no name leaves the label to stand.
+        assert_eq!(name_for_author(actor_id, actor_id, None), None);
+    }
+
+    #[test]
+    fn mentions_project_one_for_one_from_the_lookup_shape() {
+        let remote = vec![
+            fetchit_fedi::lookup::MentionRef {
+                name: "@alice@mastodon.example".to_owned(),
+                href: "https://mastodon.example/users/alice".to_owned(),
+            },
+            fetchit_fedi::lookup::MentionRef {
+                name: "@bob@fosstodon.org".to_owned(),
+                href: "https://fosstodon.org/users/bob".to_owned(),
+            },
+        ];
+        let projected: Vec<FediPostMention> = remote
+            .into_iter()
+            .map(|m| FediPostMention {
+                name: m.name,
+                href: m.href,
+            })
+            .collect();
+        assert_eq!(
+            projected,
+            vec![
+                FediPostMention {
+                    name: "@alice@mastodon.example".to_owned(),
+                    href: "https://mastodon.example/users/alice".to_owned(),
+                },
+                FediPostMention {
+                    name: "@bob@fosstodon.org".to_owned(),
+                    href: "https://fosstodon.org/users/bob".to_owned(),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn liked_state_joins_on_the_object_url() {
+        // The join key is the post URL, which is what the like driver
+        // records — a mismatch here would render every heart empty.
+        let liked: std::collections::HashSet<String> =
+            ["https://m.example/@g/1".to_owned()].into_iter().collect();
+        assert!(liked.contains("https://m.example/@g/1"));
+        assert!(!liked.contains("https://m.example/@g/2"));
     }
 
     #[test]

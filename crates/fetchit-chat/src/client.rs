@@ -4852,7 +4852,11 @@ impl Client {
 /// not a UX contract). Only the LOOKUP entrance is lenient — message-text
 /// mention scanning keeps requiring `@user@instance` so ordinary email
 /// addresses in prose never parse as mentions.
-fn normalize_lookup_handle(handle: &str) -> String {
+///
+/// Shared with [`crate::fedi_profile`], the other place a user-supplied
+/// account reference enters the network, so both entrances accept the
+/// same set of forms.
+pub(crate) fn normalize_lookup_handle(handle: &str) -> String {
     let trimmed = handle.trim().to_lowercase();
     if trimmed.starts_with('@') {
         trimmed
@@ -6692,6 +6696,24 @@ impl Client {
             .await
             .map_err(|e| ChatError::Invalid(format!("bridge-auth sign: {e}")))?;
         Ok((chat.identity.agent_id_hex().to_owned(), sig))
+    }
+
+    /// Gate an already-canonical actor URL through the community
+    /// denylist. The URL-form twin of [`Self::resolve_and_gate_mention`],
+    /// for the paths that are handed an actor URL rather than a handle
+    /// (a feed post's author, a mention's `href`). Without a denylist
+    /// installed nothing is blocked, matching the mention path.
+    ///
+    /// # Errors
+    /// [`ChatError::DeniedActor`] when `actor_url` is denylisted or
+    /// fails canonicalization.
+    pub(crate) async fn gate_actor_url(&self, actor_url: &str) -> Result<()> {
+        match self.denylist.as_ref() {
+            Some(denylist) => {
+                crate::public::check_actor_url_denylist(denylist.as_ref(), actor_url).await
+            }
+            None => Ok(()),
+        }
     }
 
     pub(crate) async fn resolve_and_gate_mention(&self, mention: &str) -> Result<Url> {

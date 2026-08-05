@@ -40,6 +40,27 @@ pub struct RemoteActor {
     /// [`crate::avatar::fetch_avatar`] owns the https + SSRF + size +
     /// content-type gates. `None` for an actor with no usable icon.
     pub icon_url: Option<String>,
+    /// `name` — the actor's chosen display name, when served. Remote
+    /// text: renderers show it beside, never instead of, the handle.
+    /// `None` when absent or served empty.
+    pub name: Option<String>,
+    /// `summary` — the actor's bio, as served. RAW remote HTML; callers
+    /// reduce it with [`crate::text::html_to_text`] before display, the
+    /// same contract as [`RemotePost::content_html`].
+    pub summary: Option<String>,
+}
+
+/// A non-empty, trimmed string field off a remote document, or `None`.
+/// A server that serves `"name": ""` means "no name", not "a name that
+/// is blank" — collapsing both here keeps every caller's fallback logic
+/// to one `is_none` check.
+fn optional_str(value: &Value, key: &str) -> Option<String> {
+    let s = value.get(key).and_then(Value::as_str)?.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_owned())
+    }
 }
 
 impl RemoteActor {
@@ -113,6 +134,8 @@ impl RemoteActor {
             rsa_public_key_pem,
             attestation_v2,
             icon_url,
+            name: optional_str(value, "name"),
+            summary: optional_str(value, "summary"),
         })
     }
 
@@ -189,6 +212,26 @@ async fn fetch_remote_actor_once(actor_url: &url::Url) -> Result<RemoteActor, Fe
     RemoteActor::from_json_ld(&value).map_err(FetchActorError::Parse)
 }
 
+/// One `Mention` tag off a remote Note: the visible `@user@host` text
+/// (`name`) and the actor URL it points at (`href`).
+///
+/// Both fields are remote-authored strings carried verbatim. `href` is
+/// NOT validated here — a consumer that acts on it (profile fetch,
+/// follow, DM) runs it back through the SSRF-guarded resolve + denylist
+/// gate first, exactly as it would a handle the user typed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MentionRef {
+    /// The mention as written in the body, e.g. `@alice@mastodon.example`.
+    pub name: String,
+    /// Actor URL the mention resolved to on the authoring server.
+    pub href: String,
+}
+
+/// Mentions retained per post. Beyond this the tail is dropped: a
+/// hostile server can put thousands of `Mention` tags on one Note, and
+/// a feed row renders a handful.
+pub const MAX_MENTIONS_PER_POST: usize = 32;
+
 /// One post from a remote actor's outbox, reduced to what a feed
 /// renders. `content_html` is the wire HTML as served — callers strip
 /// it with [`crate::text::html_to_text`] before display; it must never
@@ -206,6 +249,35 @@ pub struct RemotePost {
     pub published: String,
     /// Human-facing URL of the post (`url`, falling back to `id`).
     pub object_url: String,
+    /// `Mention` tags on the Note, capped at [`MAX_MENTIONS_PER_POST`].
+    /// Empty for a post that mentions nobody.
+    pub mentions: Vec<MentionRef>,
+}
+
+/// Collect `Mention` entries from a Note's `tag`. Tolerant of every
+/// shape servers actually serve: absent, a lone object, or an array
+/// mixing Mentions with Hashtags and Emoji. Non-Mention types and
+/// entries missing either field are skipped, never fatal — a malformed
+/// tag must cost the mention, not the post.
+fn mentions_from_tag(note: &Value) -> Vec<MentionRef> {
+    let one = |v: &Value| -> Option<MentionRef> {
+        if v.get("type").and_then(Value::as_str)? != "Mention" {
+            return None;
+        }
+        Some(MentionRef {
+            name: optional_str(v, "name")?,
+            href: optional_str(v, "href")?,
+        })
+    };
+    match note.get("tag") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(one)
+            .take(MAX_MENTIONS_PER_POST)
+            .collect(),
+        Some(v @ Value::Object(_)) => one(v).into_iter().collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn post_from_note(note: &Value, fallback_author: Option<&str>) -> Option<RemotePost> {
@@ -238,6 +310,7 @@ fn post_from_note(note: &Value, fallback_author: Option<&str>) -> Option<RemoteP
         content_html,
         published,
         object_url,
+        mentions: mentions_from_tag(note),
     })
 }
 
@@ -514,6 +587,124 @@ mod tests {
         let mut bare = fixture();
         bare.as_object_mut().unwrap().remove("icon");
         assert!(RemoteActor::from_json_ld(&bare).unwrap().icon_url.is_none());
+    }
+
+    #[test]
+    fn remote_actor_carries_display_name_and_bio_when_served() {
+        let mut v = fixture();
+        v.as_object_mut()
+            .unwrap()
+            .remove(crate::actor::PQ_ATTESTATION_PROPERTY_URI);
+        v["name"] = serde_json::json!("Eugen Rochko");
+        v["summary"] = serde_json::json!("<p>Founder of <b>Mastodon</b>.</p>");
+        let actor = RemoteActor::from_json_ld(&v).unwrap();
+        assert_eq!(actor.name.as_deref(), Some("Eugen Rochko"));
+        // The bio is carried RAW; reduction to text is the caller's job.
+        assert_eq!(
+            actor.summary.as_deref(),
+            Some("<p>Founder of <b>Mastodon</b>.</p>")
+        );
+    }
+
+    #[test]
+    fn absent_or_blank_name_and_summary_read_as_none() {
+        let mut v = fixture();
+        let obj = v.as_object_mut().unwrap();
+        obj.remove(crate::actor::PQ_ATTESTATION_PROPERTY_URI);
+        obj.remove("name");
+        obj.remove("summary");
+        let bare = RemoteActor::from_json_ld(&v).unwrap();
+        assert!(bare.name.is_none());
+        assert!(bare.summary.is_none());
+
+        // A server that serves an empty string means "no name": the
+        // fallback to the handle must fire, not render a blank line.
+        v["name"] = serde_json::json!("   ");
+        v["summary"] = serde_json::json!("");
+        let blank = RemoteActor::from_json_ld(&v).unwrap();
+        assert!(blank.name.is_none());
+        assert!(blank.summary.is_none());
+    }
+
+    #[test]
+    fn mentions_are_collected_from_the_tag_array() {
+        let note = serde_json::json!({
+            "type": "Note",
+            "attributedTo": "https://m.example/users/g",
+            "content": "<p>hey @alice and @bob</p>",
+            "tag": [
+                {"type": "Mention", "name": "@alice@mastodon.example",
+                 "href": "https://mastodon.example/users/alice"},
+                {"type": "Hashtag", "name": "#rust", "href": "https://m.example/tags/rust"},
+                {"type": "Mention", "name": "@bob@fosstodon.org",
+                 "href": "https://fosstodon.org/users/bob"},
+            ],
+        });
+        let post = post_from_note(&note, None).unwrap();
+        assert_eq!(
+            post.mentions,
+            vec![
+                MentionRef {
+                    name: "@alice@mastodon.example".into(),
+                    href: "https://mastodon.example/users/alice".into(),
+                },
+                MentionRef {
+                    name: "@bob@fosstodon.org".into(),
+                    href: "https://fosstodon.org/users/bob".into(),
+                },
+            ],
+            "hashtags and emoji share the tag array; only Mentions ride",
+        );
+    }
+
+    #[test]
+    fn tolerates_a_lone_tag_object_and_malformed_entries() {
+        let single = serde_json::json!({
+            "type": "Note", "attributedTo": "https://m.example/u/g", "content": "hi",
+            "tag": {"type": "Mention", "name": "@a@h", "href": "https://h/users/a"},
+        });
+        assert_eq!(post_from_note(&single, None).unwrap().mentions.len(), 1);
+
+        // A Mention missing href (or name) is skipped; the POST survives.
+        let broken = serde_json::json!({
+            "type": "Note", "attributedTo": "https://m.example/u/g", "content": "hi",
+            "tag": [
+                {"type": "Mention", "name": "@a@h"},
+                {"type": "Mention", "href": "https://h/users/b"},
+                {"type": "Mention", "name": "", "href": "https://h/users/c"},
+                "not an object",
+            ],
+        });
+        let post = post_from_note(&broken, None).unwrap();
+        assert!(post.mentions.is_empty());
+        assert_eq!(post.content_html, "hi", "a bad tag costs the mention only");
+
+        // No tag at all is the common case.
+        let none = serde_json::json!({
+            "type": "Note", "attributedTo": "https://m.example/u/g", "content": "hi",
+        });
+        assert!(post_from_note(&none, None).unwrap().mentions.is_empty());
+    }
+
+    #[test]
+    fn mentions_are_capped_against_a_hostile_tag_array() {
+        let tags: Vec<Value> = (0..(MAX_MENTIONS_PER_POST + 40))
+            .map(|i| {
+                serde_json::json!({
+                    "type": "Mention",
+                    "name": format!("@u{i}@h"),
+                    "href": format!("https://h/users/{i}"),
+                })
+            })
+            .collect();
+        let note = serde_json::json!({
+            "type": "Note", "attributedTo": "https://m.example/u/g",
+            "content": "spam", "tag": tags,
+        });
+        assert_eq!(
+            post_from_note(&note, None).unwrap().mentions.len(),
+            MAX_MENTIONS_PER_POST,
+        );
     }
 
     fn outbox_page() -> Value {
