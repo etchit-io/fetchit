@@ -350,6 +350,8 @@ mod tests {
                 ml_dsa_pubkey: vec![0xAA; 8],
                 signature: vec![0xBB; 8],
             }),
+            icon_url: None,
+            icon_media_type: None,
         }
     }
 
@@ -676,6 +678,8 @@ mod tests {
             spki_der: vec![7, 7],
             ml_dsa_attestation: v1,
             ml_dsa_attestation_v2: v2,
+            icon_url: None,
+            icon_media_type: None,
         }
     }
 

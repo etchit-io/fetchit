@@ -78,6 +78,12 @@ class ChatModeView(
     private val lifecycleOwner: LifecycleOwner,
     private val onLaunchScanner: () -> Unit,
     private val onOpenAutonomi: (String) -> Unit = {},
+    // The photo picker is an activity-result contract, so it has to be
+    // registered on the activity; the badge menu only asks for it. Both
+    // entry points (here and Settings) route through the same handlers so
+    // "set my picture" behaves identically wherever it is reached from.
+    private val onPickProfilePicture: () -> Unit = {},
+    private val onRemoveProfilePicture: () -> Unit = {},
 ) {
 
     // The dedicated screen-swap surface inside chatContainer.
@@ -164,6 +170,10 @@ class ChatModeView(
     /** Draft handed over by [composeFeedPost] (the reader's "post to feed"),
      *  consumed by the next bind of the feed compose row. */
     private var pendingFeedCompose: String? = null
+
+    /** Whether the last badge bind found the user's own picture locally.
+     *  Drives the "remove picture" menu entry without a main-thread read. */
+    private var selfAvatarPresent = false
 
     /** Decoded fediverse profile pictures, keyed by canonical `user@host`. */
     private val fediAvatars = FediAvatars(
@@ -693,8 +703,11 @@ class ChatModeView(
         // it opens the share-my-code card. The display name resolves from the
         // connected gateway when available, else from the saved setting (no
         // connection needed); "You"/"?" before any name is set.
-        bindIdentityBadge(identityAvatar, identityName)
-        identityBadge.setOnClickListener { onIdentityBadgeTap(identityAvatar, identityName) }
+        val identityAvatarImage = view.findViewById<ImageView>(R.id.chatIdentityAvatarImage)
+        bindIdentityBadge(identityAvatar, identityAvatarImage, identityName)
+        identityBadge.setOnClickListener {
+            onIdentityBadgeTap(identityBadge, identityAvatar, identityAvatarImage, identityName)
+        }
 
         // Adapter: one unified list — groups, private contacts, and fediverse
         // threads, newest activity first (buildChatRows). No pinned rows.
@@ -856,6 +869,64 @@ class ChatModeView(
      * required). Before any name is set the badge reads "You" with a "?"
      * avatar, mirroring desktop's empty-name fallback.
      */
+    private fun bindIdentityBadge(avatar: TextView, image: ImageView, name: TextView) {
+        bindSelfAvatar(avatar, image)
+        bindIdentityBadge(avatar, name)
+    }
+
+    /**
+     * Draw the user's own profile picture over the initials, or leave the
+     * initials showing when there is none.
+     *
+     * Reads the engine's LOCAL copy only. This is a private (LIT) surface:
+     * if drawing the header could fetch, then opening the chat list would
+     * produce a request to a fediverse server, and that server's access log
+     * would carry the timing of someone's private messaging. The set path
+     * writes the bytes locally, so nothing here ever needs the network.
+     */
+    private fun bindSelfAvatar(avatar: TextView, image: ImageView) {
+        image.setImageDrawable(null)
+        image.visibility = View.GONE
+        lifecycleScope.launch {
+            // Read AND decode off the main thread: the badge is bound on
+            // every return to the list, and a picture is real work.
+            val bmp = withContext(Dispatchers.IO) {
+                val bytes = runCatching { controller.gateway()?.fediSelfAvatar() }.getOrNull()
+                selfAvatarPresent = bytes?.isNotEmpty() == true
+                bytes?.takeIf { it.isNotEmpty() }
+                    ?.let { FediAvatars.decodeBounded(it, SELF_AVATAR_TARGET_PX) }
+            } ?: return@launch
+            image.setImageDrawable(circleOf(bmp))
+            image.visibility = View.VISIBLE
+            // The initials stay in the tree as the fallback, but must not
+            // show through a picture with transparent edges.
+            avatar.text = ""
+        }
+    }
+
+    /**
+     * The user's own picture changed. Drop every decoded avatar and
+     * re-bind the badge.
+     *
+     * The bitmap cache is keyed by label, and our own label is one of
+     * them — the feed and People rows draw our own face from it too, so
+     * leaving it in place would keep showing the old picture until the
+     * process restarted.
+     */
+    fun onProfilePictureChanged() {
+        fediAvatars.clear()
+        refreshIdentityBadge()
+    }
+
+    /** Re-read the badge after the picture or the name changed. */
+    private fun refreshIdentityBadge() {
+        val view = listView ?: return
+        val avatar = view.findViewById<TextView>(R.id.chatIdentityAvatar) ?: return
+        val image = view.findViewById<ImageView>(R.id.chatIdentityAvatarImage) ?: return
+        val name = view.findViewById<TextView>(R.id.chatIdentityName) ?: return
+        bindIdentityBadge(avatar, image, name)
+    }
+
     private fun bindIdentityBadge(avatar: TextView, name: TextView) {
         // Read the SAVED name only -- never displayNameOrDefault, whose
         // agent-<hex> fallback would leak the very hex this badge exists to
@@ -883,11 +954,40 @@ class ChatModeView(
      * dead-ending on "?"); once a name exists, the badge shares the user's
      * code, mirroring desktop where the badge opens the share card.
      */
-    private fun onIdentityBadgeTap(avatar: TextView, name: TextView) {
-        if (SettingsStore(context).chatDisplayName().isBlank()) {
-            promptSetMyName(avatar, name)
-        } else {
-            lifecycleScope.launch { onShareMyCodeClicked() }
+    private fun onIdentityBadgeTap(
+        anchor: View,
+        avatar: TextView,
+        image: ImageView,
+        name: TextView,
+    ) {
+        val nameLabel = context.getString(
+            if (SettingsStore(context).chatDisplayName().isBlank()) {
+                R.string.chat_identity_add_name
+            } else {
+                R.string.chat_identity_change_name
+            },
+        )
+        val shareLabel = context.getString(R.string.chat_identity_share_code)
+        val setPictureLabel = context.getString(R.string.profile_picture_set_action)
+        val removePictureLabel = context.getString(R.string.profile_picture_remove_action)
+        PopupMenu(context, anchor).apply {
+            menu.add(nameLabel)
+            menu.add(setPictureLabel)
+            // "Remove" is offered only when there is something to remove.
+            // Read from the last bind rather than the disk, so opening a
+            // menu never blocks the main thread on a file.
+            if (selfAvatarPresent) menu.add(removePictureLabel)
+            menu.add(shareLabel)
+            setOnMenuItemClickListener { item ->
+                when (item.title) {
+                    nameLabel -> promptSetMyName(avatar, name)
+                    setPictureLabel -> onPickProfilePicture()
+                    removePictureLabel -> onRemoveProfilePicture()
+                    else -> lifecycleScope.launch { onShareMyCodeClicked() }
+                }
+                true
+            }
+            show()
         }
     }
 
@@ -4027,5 +4127,10 @@ class ChatModeView(
         // Avatar edge on the People rows and feed post rows — smaller than
         // the 36dp chat-list circle so a dense list stays scannable.
         private const val PEOPLE_AVATAR_DP = 28
+
+        // Decode target for the header badge's own picture. The published
+        // image is at most 512px square, so this only ever subsamples a
+        // source that was already small.
+        private const val SELF_AVATAR_TARGET_PX = 144
     }
 }

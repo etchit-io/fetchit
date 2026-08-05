@@ -262,6 +262,8 @@ mod tests {
                 vec![0xBB; 4],
             ),
             ml_dsa_attestation_v2: None,
+            icon_url: None,
+            icon_media_type: None,
         };
         crate::fedi_vault::save_actor_identity(&vault, &master, layout).unwrap();
     }

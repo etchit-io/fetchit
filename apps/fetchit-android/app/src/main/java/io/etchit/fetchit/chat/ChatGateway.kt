@@ -262,6 +262,29 @@ interface ChatGateway {
     fun fediAvatarCached(label: String): ByteArray? = null
 
     /**
+     * Publish [bytes] as the user's own profile picture.
+     *
+     * The bytes must already be the final image — [ProfilePicture.prepare]
+     * crops, downscales and RE-ENCODES the photo the user picked, which is
+     * what strips its EXIF. Nothing below this call rewrites the image, so
+     * whatever metadata is still in it goes out with it.
+     *
+     * Throws when no handle is minted, the image fails the format/size
+     * checks, or the bridge refuses the upload.
+     */
+    suspend fun fediSetAvatar(bytes: ByteArray, contentType: String) {}
+
+    /** Remove the user's own profile picture. Throws on failure. */
+    suspend fun fediClearAvatar() {}
+
+    /**
+     * The user's own picture, or null when they have not set one. Reads
+     * the local copy the set path wrote — never fetches, so the LIT
+     * surfaces may draw it (see [fediAvatarCached] for why that matters).
+     */
+    fun fediSelfAvatar(): ByteArray? = null
+
+    /**
      * The `@user@host` labels of accounts following the minted handle,
      * newest first. Throws when no handle is minted or the directory is
      * unreachable.
@@ -451,6 +474,10 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
         inner.fediMarkThreadRead(label)
     override fun fediAvatar(label: String): ByteArray? = inner.fediAvatar(label)
     override fun fediAvatarCached(label: String): ByteArray? = inner.fediAvatarCached(label)
+    override suspend fun fediSetAvatar(bytes: ByteArray, contentType: String) =
+        inner.fediSetAvatar(bytes, contentType)
+    override suspend fun fediClearAvatar() = inner.fediClearAvatar()
+    override fun fediSelfAvatar(): ByteArray? = inner.fediSelfAvatar()
     override suspend fun fediFollowers(): List<String> = inner.fediFollowers()
 
     override fun reconnectingGroups(): List<String> = inner.reconnectingGroups()

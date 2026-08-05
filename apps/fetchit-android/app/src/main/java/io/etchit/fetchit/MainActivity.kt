@@ -10,16 +10,19 @@ import android.util.Log
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.util.UnstableApi
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import io.etchit.fetchit.chat.ChatModeView
+import io.etchit.fetchit.chat.ProfilePicture
 import io.etchit.fetchit.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -150,6 +153,17 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     private val saveLauncher = registerForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream"),
     ) { uri -> uri?.let(::onSavePicked) }
+
+    /**
+     * Photo picker for the user's own profile picture.
+     *
+     * `PickVisualMedia` is the modern, permission-free picker: the system
+     * UI hands back exactly the one image the user chose, so the app never
+     * asks for — and never holds — access to the whole photo library.
+     */
+    private val pickAvatarLauncher = registerForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri -> uri?.let(::onProfilePicturePicked) }
 
     /** Bytes waiting for the user to confirm a SAF destination — written
      *  on the matching launcher callback and cleared after. The save and
@@ -292,7 +306,13 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         audio = AudioPlayback(this)
         renderer = RenditionRenderer(binding, audio, ::onAudioError, archiveCallbacks)
         store = BookmarkStore(this)
-        settingsSheet = SettingsSheet(binding, this, onLaunchScanner = ::onScanClicked).also { it.bind() }
+        settingsSheet = SettingsSheet(
+            binding,
+            this,
+            onLaunchScanner = ::onScanClicked,
+            onPickProfilePicture = ::pickProfilePicture,
+            onRemoveProfilePicture = ::removeProfilePicture,
+        ).also { it.bind() }
         chatModeView = ChatModeView(
             context = this,
             container = binding.chatContainer,
@@ -304,6 +324,8 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
                 setMode(Mode.BROWSE)
                 loadAddress(addr)
             },
+            onPickProfilePicture = ::pickProfilePicture,
+            onRemoveProfilePicture = ::removeProfilePicture,
         )
 
         binding.fetchButton.setOnTapListener { onFetchClicked() }
@@ -770,6 +792,89 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
                     Snackbar.LENGTH_LONG,
                 ).show()
             }
+    }
+
+    /**
+     * Open the system photo picker so the user can choose a profile
+     * picture. Shared by Settings and the chat identity badge, so the flow
+     * is identical wherever it starts.
+     *
+     * A picture lives on the actor document, so there has to be a public
+     * handle for it to live on; without one the picker would lead nowhere.
+     */
+    fun pickProfilePicture() {
+        if (fetchitApp().chatController.fediActorStatus() == null) {
+            snackId(R.string.profile_picture_needs_handle)
+            return
+        }
+        pickAvatarLauncher.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+        )
+    }
+
+    /** Remove the published profile picture, after a confirmation. */
+    fun removeProfilePicture() {
+        if (fetchitApp().chatController.fediActorStatus() == null) {
+            snackId(R.string.profile_picture_needs_handle)
+            return
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.profile_picture_remove_title)
+            .setMessage(R.string.profile_picture_remove_message)
+            .setNegativeButton(R.string.action_cancel, null)
+            .setPositiveButton(R.string.profile_picture_remove_action) { _, _ ->
+                lifecycleScope.launch {
+                    val gw = runCatching { fetchitApp().chatController.ensureGateway() }.getOrNull()
+                        ?: return@launch snackId(R.string.profile_picture_offline)
+                    runCatching { gw.fediClearAvatar() }
+                        .onSuccess {
+                            chatModeView.onProfilePictureChanged()
+                            snackId(R.string.profile_picture_removed)
+                        }
+                        .onFailure { snackId(R.string.profile_picture_failed) }
+                }
+            }
+            .show()
+    }
+
+    /**
+     * Prepare and publish the picked photo.
+     *
+     * The whole transform runs here, on the device, BEFORE the upload:
+     * [ProfilePicture.prepare] decodes, centre-crops, downscales and
+     * re-encodes. That last step is the privacy-load-bearing one — a JPEG
+     * straight off a camera carries EXIF, and EXIF routinely carries GPS.
+     * Re-encoding keeps the pixels and drops everything else.
+     */
+    private fun onProfilePicturePicked(uri: android.net.Uri) {
+        lifecycleScope.launch {
+            snackId(R.string.profile_picture_working)
+            val prepared = withContext(Dispatchers.IO) {
+                runCatching {
+                    contentResolver.openInputStream(uri)?.use(ProfilePicture::readBounded)
+                }.getOrNull()?.let(ProfilePicture::prepare)
+            }
+            if (prepared == null) {
+                snackId(R.string.profile_picture_unreadable)
+                return@launch
+            }
+            val gw = runCatching { fetchitApp().chatController.ensureGateway() }.getOrNull()
+                ?: return@launch snackId(R.string.profile_picture_offline)
+            runCatching { gw.fediSetAvatar(prepared, ProfilePicture.CONTENT_TYPE) }
+                .onSuccess {
+                    chatModeView.onProfilePictureChanged()
+                    snackId(R.string.profile_picture_set)
+                }
+                .onFailure { e ->
+                    Log.w(TAG, "profile picture upload failed", e)
+                    snackId(R.string.profile_picture_failed)
+                }
+        }
+    }
+
+    /** One-line Snackbar on the root coordinator. */
+    private fun snackId(resId: Int) {
+        Snackbar.make(binding.rootCoordinator, resId, Snackbar.LENGTH_SHORT).show()
     }
 
     private fun suggestedName(mime: String): String {

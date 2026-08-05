@@ -5958,6 +5958,8 @@ impl Client {
             spki_der: material.spki_der.clone(),
             ml_dsa_attestation: attestation.clone(),
             ml_dsa_attestation_v2: None,
+            icon_url: None,
+            icon_media_type: None,
         };
         crate::fedi_vault::save_actor_identity(&vault, &master, &chat.layout)?;
 
@@ -6039,6 +6041,8 @@ impl Client {
             spki_der: material.spki_der.clone(),
             ml_dsa_attestation: attestation.clone(),
             ml_dsa_attestation_v2: Some(attestation_v2.clone()),
+            icon_url: None,
+            icon_media_type: None,
         };
         crate::fedi_vault::save_actor_identity(&vault, &master, &chat.layout)?;
 
@@ -6566,11 +6570,55 @@ impl Client {
             vault.ml_dsa_attestation,
             vault.actor_url,
             vault.agent_id_hex,
-        );
+        )
+        .with_icon(vault.icon_url, vault.icon_media_type);
         Ok(Some(match vault.ml_dsa_attestation_v2 {
             Some(att2) => identity.with_attestation_v2(att2),
             None => identity,
         }))
+    }
+
+    /// Record (or clear) the published avatar on the actor vault for
+    /// `handle`, returning the identity as it now stands — which is what
+    /// the caller re-registers.
+    ///
+    /// The picture lives outside both attestations on purpose, so this
+    /// writes the vault without re-signing anything.
+    ///
+    /// # Errors
+    ///
+    /// - [`ChatError::Invalid`] when chat state is uninitialised, the
+    ///   handle fails validation, or no identity exists for `handle`.
+    /// - Propagates master-key resolution and vault read/write failures.
+    pub(crate) async fn record_actor_icon(
+        &self,
+        handle: &str,
+        icon_url: Option<String>,
+        icon_media_type: Option<String>,
+    ) -> Result<fetchit_fedi::actor::ActorIdentity> {
+        let chat = self
+            .chat
+            .as_ref()
+            .ok_or_else(|| ChatError::Invalid("chat state not initialised".into()))?;
+        validate_actor_handle(handle)?;
+
+        let identity_vault_path = chat.layout.root.join(IDENTITY_VAULT_FILE);
+        let (master, _kdf, _salt) =
+            resolve_master_key(&identity_vault_path, self.custody_passphrase())?;
+        let Some(mut vault) =
+            crate::fedi_vault::load_actor_identity(handle, &master, &chat.layout)?
+        else {
+            return Err(ChatError::Invalid(format!(
+                "no actor identity for {handle}"
+            )));
+        };
+        vault.icon_url = icon_url;
+        vault.icon_media_type = icon_media_type;
+        crate::fedi_vault::save_actor_identity(&vault, &master, &chat.layout)?;
+
+        self.load_actor_identity(handle).await?.ok_or_else(|| {
+            ChatError::Invalid(format!("actor identity for {handle} vanished mid-update"))
+        })
     }
 
     /// Publish a public post to the fediverse: wrap it as an
@@ -9350,6 +9398,56 @@ mod tests {
             .expect("load resolves the same retained custody")
             .expect("identity persisted");
         assert_eq!(loaded.handle, "alice");
+    }
+
+    #[tokio::test]
+    async fn recording_an_icon_reaches_the_published_actor_document() {
+        // The whole point of persisting the picture on the identity: the
+        // document the bridge (and Mastodon) reads must carry the icon,
+        // and clearing it must take the key back out.
+        let (client, _dir) = test_client_no_denylist();
+        client
+            .mint_actor_identity("alice", "etchit.io")
+            .await
+            .expect("mint");
+
+        let identity = client
+            .record_actor_icon(
+                "alice",
+                Some("https://etchit.io/actors/alice/avatar".into()),
+                Some("image/jpeg".into()),
+            )
+            .await
+            .expect("record icon");
+        assert_eq!(
+            identity.icon_url.as_deref(),
+            Some("https://etchit.io/actors/alice/avatar")
+        );
+        let doc = fetchit_fedi::actor::Actor::from_identity(&identity)
+            .expect("render")
+            .to_json_ld();
+        assert_eq!(doc["icon"]["url"], "https://etchit.io/actors/alice/avatar");
+        assert_eq!(doc["icon"]["mediaType"], "image/jpeg");
+
+        // A reload from disk sees the same thing (it is the vault, not
+        // just the returned value, that was updated).
+        let reloaded = client
+            .load_actor_identity("alice")
+            .await
+            .expect("load")
+            .expect("minted");
+        assert_eq!(reloaded.icon_url, identity.icon_url);
+        assert_eq!(reloaded.icon_media_type.as_deref(), Some("image/jpeg"));
+
+        let cleared = client
+            .record_actor_icon("alice", None, None)
+            .await
+            .expect("clear icon");
+        assert!(cleared.icon_url.is_none());
+        let doc = fetchit_fedi::actor::Actor::from_identity(&cleared)
+            .expect("render")
+            .to_json_ld();
+        assert!(doc.get("icon").is_none(), "a cleared icon emits no key");
     }
 
     #[tokio::test]

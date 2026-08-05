@@ -46,7 +46,10 @@ fn now_ms() -> u64 {
 ///
 /// 401 for header/shape problems, 403 for a failed binding, 404 for an
 /// unknown handle — the same order a caller probes.
-async fn auth_actor(
+///
+/// Shared with [`crate::routes::avatar`]: every authed owner-scoped
+/// endpoint runs the SAME check, so the binding rule has one definition.
+pub(crate) async fn auth_actor(
     state: &BridgeState,
     handle: &str,
     headers: &HeaderMap,
