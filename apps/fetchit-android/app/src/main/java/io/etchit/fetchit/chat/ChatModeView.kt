@@ -892,9 +892,9 @@ class ChatModeView(
             // every return to the list, and a picture is real work.
             val bmp = withContext(Dispatchers.IO) {
                 val bytes = runCatching { controller.gateway()?.fediSelfAvatar() }.getOrNull()
-                selfAvatarPresent = bytes != null && bytes.isNotEmpty()
-                if (!selfAvatarPresent) null
-                else FediAvatars.decodeBounded(bytes ?: ByteArray(0), SELF_AVATAR_TARGET_PX)
+                selfAvatarPresent = bytes?.isNotEmpty() == true
+                bytes?.takeIf { it.isNotEmpty() }
+                    ?.let { FediAvatars.decodeBounded(it, SELF_AVATAR_TARGET_PX) }
             } ?: return@launch
             image.setImageDrawable(circleOf(bmp))
             image.visibility = View.VISIBLE
