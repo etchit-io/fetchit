@@ -43,11 +43,19 @@ const INBOX_REFILL_PER_SEC: f64 = 2.0;
 /// rejected as `413` by the layer, before the handler allocates them.
 const MAX_AVATAR_BODY_BYTES: usize = fetchit_fedi::avatar::MAX_AVATAR_BYTES;
 
-/// Avatar-write per-IP burst. A user sets a picture once in a while;
-/// this only has to be above a double-tap.
-const AVATAR_WRITE_BURST: u32 = 10;
-/// Avatar-write per-IP sustained refill, tokens per second (12/min).
-const AVATAR_WRITE_REFILL_PER_SEC: f64 = 0.2;
+/// Avatar-write per-IP burst.
+///
+/// Sized for the deployment, not for one person: the limiter keys on the
+/// client IP as [`client_ip`] resolves it, which is the socket peer
+/// unless the operator has configured `trusted_proxy_hops`. Behind the
+/// edge worker that peer is the EDGE, so this bucket is shared by
+/// everyone -- the same reasoning [`INBOX_BURST`] carries. A per-user
+/// value here would lock out the second person to set a picture in the
+/// same minute. Worst case it still bounds writes to
+/// 30 x [`MAX_AVATAR_BODY_BYTES`] per minute.
+const AVATAR_WRITE_BURST: u32 = 30;
+/// Avatar-write per-IP sustained refill, tokens per second (30/min).
+const AVATAR_WRITE_REFILL_PER_SEC: f64 = 0.5;
 
 /// Shared state handed to every handler.
 pub struct BridgeState {
