@@ -429,6 +429,13 @@ fn stable_object_tag(object_url: &str) -> String {
 /// line breaks become `<br>`; the whole body is wrapped in one `<p>`.
 /// Rich markdown (bold, links, lists) is deferred to a later stage —
 /// recipients see escaped plain text until then.
+///
+/// The one markup we *do* emit is an anchor per Autonomi address (see
+/// [`linkify_autonomi_addresses`]) — the funnel that turns a mention of
+/// a content address on Mastodon into a tappable link to the fetch>it
+/// landing page. Anchors are synthesised from a hex-only match, never
+/// passed through from the body, so the XSS-safe-by-construction claim
+/// still holds.
 #[must_use]
 pub fn markdown_body_to_html(body: &str) -> String {
     let escaped = body
@@ -437,8 +444,103 @@ pub fn markdown_body_to_html(body: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;");
-    let with_breaks = escaped.replace('\n', "<br>");
+    let linked = linkify_autonomi_addresses(&escaped);
+    let with_breaks = linked.replace('\n', "<br>");
     format!("<p>{with_breaks}</p>")
+}
+
+/// Landing page an Autonomi address links to in an outbound public post.
+/// The address rides in the fragment, so the hex never reaches the
+/// server's logs and the page resolves it client-side.
+const ADDRESS_LANDING_BASE: &str = "https://etchit.io/a/#";
+
+/// Length of an Autonomi content address in hex characters.
+const ADDRESS_HEX_LEN: usize = 64;
+
+/// Is `b` a character that may not sit immediately beside an address
+/// token? Mirrors the Android detector's `[0-9A-Za-z_]` lookaround, so a
+/// 65-character hex run — or a 64-hex substring glued into a longer
+/// identifier — never linkifies.
+fn is_token_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Wrap every Autonomi address in `escaped` in an anchor to the fetch>it
+/// landing page.
+///
+/// Token grammar mirrors `AutonomiRefs.kt` on Android — an optional
+/// `autonomi://` scheme, an optional `0x`, then exactly 64 hex
+/// characters, with no `[0-9A-Za-z_]` character
+/// immediately adjacent on either side. The `href` carries the bare
+/// lowercase hex; the anchor TEXT is the matched token verbatim, so a
+/// fetch>it client reducing the HTML back to text with
+/// [`crate::text::html_to_text`] recovers exactly what the author typed
+/// and still renders its own content card.
+///
+/// Takes ALREADY-ESCAPED input: hex, `:` and `/` all survive escaping
+/// unchanged, and every entity the escape pass emits ends in `;` (never
+/// a token character), so matching after escaping sees the same token
+/// boundaries as matching before it — while keeping the emitted anchor
+/// out of the escaper's reach.
+#[must_use]
+pub fn linkify_autonomi_addresses(escaped: &str) -> String {
+    let bytes = escaped.as_bytes();
+    let mut out = String::with_capacity(escaped.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        // A token can only start where the previous byte is not a token
+        // character (the lookbehind).
+        let boundary_before = i == 0 || !is_token_char(bytes[i - 1]);
+        if boundary_before {
+            if let Some((end, hex)) = match_address(bytes, i) {
+                out.push_str("<a href=\"");
+                out.push_str(ADDRESS_LANDING_BASE);
+                out.push_str(&hex);
+                out.push_str("\">");
+                out.push_str(&escaped[i..end]);
+                out.push_str("</a>");
+                i = end;
+                continue;
+            }
+        }
+        // Not a token start: copy this character and move on. `i` always
+        // lands on a char boundary — every branch above advances past
+        // ASCII only, and this one advances by a whole character.
+        let ch_len = escaped[i..].chars().next().map_or(1, char::len_utf8);
+        out.push_str(&escaped[i..i + ch_len]);
+        i += ch_len;
+    }
+    out
+}
+
+/// Try to match one address token at `start`. Returns the exclusive end
+/// offset and the lowercase hex, or `None` when no token starts here.
+fn match_address(bytes: &[u8], start: usize) -> Option<(usize, String)> {
+    /// Optional scheme prefix, matched ASCII-case-insensitively.
+    const SCHEME: &[u8] = b"autonomi://";
+    let mut i = start;
+    if bytes.len() - i >= SCHEME.len() && bytes[i..i + SCHEME.len()].eq_ignore_ascii_case(SCHEME) {
+        i += SCHEME.len();
+    }
+    // Optional `0x` prefix (the Autonomi app prefixes public addresses).
+    if bytes.len() - i >= 2 && bytes[i] == b'0' && (bytes[i + 1] | 0x20) == b'x' {
+        i += 2;
+    }
+    let hex_start = i;
+    if bytes.len() - hex_start < ADDRESS_HEX_LEN {
+        return None;
+    }
+    let hex_end = hex_start + ADDRESS_HEX_LEN;
+    if !bytes[hex_start..hex_end].iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    // The lookahead: a 65th hex character (or any other token character)
+    // means this run is not a free-standing address.
+    if bytes.get(hex_end).copied().is_some_and(is_token_char) {
+        return None;
+    }
+    let hex = String::from_utf8(bytes[hex_start..hex_end].to_ascii_lowercase()).ok()?;
+    Some((hex_end, hex))
 }
 
 /// Format milliseconds-since-epoch (UTC) as an RFC 3339 / ISO 8601
@@ -528,6 +630,145 @@ mod tests {
         assert_eq!(html, "<p>a &lt;script&gt;&amp;&quot;&#39;<br>b</p>");
         // No raw angle-bracketed tag survives the escape.
         assert!(!html.contains("<script>"));
+    }
+
+    // ---- funnel: autonomi addresses become links on Mastodon ----
+
+    /// 64 hex characters, mixed case, so the lowercasing of the `href`
+    /// is visible in the assertions.
+    const ADDR: &str = "AbC1230000000000000000000000000000000000000000000000000000000def";
+    const ADDR_LOWER: &str = "abc1230000000000000000000000000000000000000000000000000000000def";
+
+    #[test]
+    fn bare_address_linkifies_to_the_landing_page() {
+        let html = markdown_body_to_html(&format!("read this {ADDR} now"));
+        assert_eq!(
+            html,
+            format!(
+                "<p>read this <a href=\"https://etchit.io/a/#{ADDR_LOWER}\">{ADDR}</a> now</p>"
+            ),
+        );
+    }
+
+    #[test]
+    fn prefixed_forms_linkify_and_keep_their_text_verbatim() {
+        for token in [
+            format!("autonomi://{ADDR}"),
+            format!("0x{ADDR}"),
+            format!("autonomi://0x{ADDR}"),
+            format!("AUTONOMI://{ADDR}"),
+        ] {
+            let html = markdown_body_to_html(&token);
+            assert_eq!(
+                html,
+                format!("<p><a href=\"https://etchit.io/a/#{ADDR_LOWER}\">{token}</a></p>"),
+                "token {token} must linkify with its original text",
+            );
+        }
+    }
+
+    #[test]
+    fn adjacent_word_characters_never_linkify() {
+        // A 65-hex run, a 63-hex run, and a 64-hex run glued into a
+        // longer identifier: none is a free-standing address, so none
+        // may sprout a link (mirrors AutonomiRefs.kt's lookarounds).
+        for body in [
+            format!("{ADDR}0"),
+            format!("0{ADDR}"),
+            ADDR[..63].to_owned(),
+            format!("id_{ADDR}"),
+            format!("{ADDR}_id"),
+            format!("autonomi://{ADDR}f"),
+        ] {
+            let html = markdown_body_to_html(&body);
+            assert!(
+                !html.contains("<a href"),
+                "{body} must not linkify, got {html}",
+            );
+        }
+    }
+
+    #[test]
+    fn punctuation_around_a_token_still_leaves_it_free_standing() {
+        for (body, expect_link) in [
+            (format!("({ADDR})"), true),
+            (format!("{ADDR}."), true),
+            (format!("see:{ADDR}"), true),
+            (format!("\"{ADDR}\""), true),
+        ] {
+            let html = markdown_body_to_html(&body);
+            assert_eq!(
+                html.contains("<a href"),
+                expect_link,
+                "body {body} produced {html}",
+            );
+        }
+    }
+
+    #[test]
+    fn escaping_of_surrounding_text_is_unaffected() {
+        // A `<` and an `&` beside the token still escape, and the entity
+        // they produce (ending in `;`) does not glue itself to the token.
+        let html = markdown_body_to_html(&format!("a<b & {ADDR} <end>"));
+        assert!(html.starts_with("<p>a&lt;b &amp; <a href="), "got {html}");
+        assert!(html.ends_with("</a> &lt;end&gt;</p>"), "got {html}");
+        assert!(!html.contains("<end>"), "got {html}");
+    }
+
+    #[test]
+    fn an_entity_immediately_before_a_token_does_not_block_the_link() {
+        // `&`, `<`, `"` and `'` all escape to entities ending in `;`,
+        // which is not a token character — the same boundary the raw
+        // character had. Pin it so a future escape change that emits a
+        // trailing word character is caught here.
+        for lead in ['&', '<', '>', '"', '\''] {
+            let html = markdown_body_to_html(&format!("{lead}{ADDR}"));
+            assert!(html.contains("<a href"), "lead {lead:?} gave {html}");
+        }
+    }
+
+    #[test]
+    fn multiple_addresses_in_one_body_all_linkify() {
+        let second = "f".repeat(64);
+        let html = markdown_body_to_html(&format!("{ADDR} and {second}"));
+        assert_eq!(html.matches("<a href").count(), 2, "got {html}");
+        assert!(html.contains(&format!("https://etchit.io/a/#{second}")));
+    }
+
+    #[test]
+    fn newlines_still_become_breaks_around_a_link() {
+        let html = markdown_body_to_html(&format!("top\n{ADDR}\nbottom"));
+        assert_eq!(
+            html,
+            format!(
+                "<p>top<br><a href=\"https://etchit.io/a/#{ADDR_LOWER}\">{ADDR}</a><br>bottom</p>"
+            ),
+        );
+    }
+
+    #[test]
+    fn non_ascii_bodies_survive_the_scan() {
+        // The scanner indexes by byte, so a multi-byte character next to
+        // a token must not split a char boundary (that would panic).
+        let html = markdown_body_to_html(&format!("héllo — {ADDR} ✨"));
+        assert!(html.contains("héllo — <a href="), "got {html}");
+        assert!(html.ends_with("</a> ✨</p>"), "got {html}");
+    }
+
+    #[test]
+    fn round_trip_through_html_to_text_recovers_the_original_token() {
+        // fetch>it clients reduce wire HTML to text and grow their own
+        // content card from the token, so the anchor must collapse back
+        // to exactly what the author typed.
+        for token in [
+            ADDR.to_owned(),
+            format!("autonomi://{ADDR}"),
+            format!("0x{ADDR}"),
+        ] {
+            let body = format!("look: {token} !");
+            let html = markdown_body_to_html(&body);
+            assert_eq!(crate::text::html_to_text(&html), body, "token {token}");
+        }
     }
 
     #[test]
