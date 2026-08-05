@@ -119,7 +119,7 @@
 - **The sender's own copy is durable.** The engine's outbox bubble carries the image itself (`OutboxBubble::attachment`, surfaced as `OutboxBubbleFfi.attachment`), so a sent photo reloads from the vault and still draws in the sender's thread after a restart, and an engine-driven RESEND re-sends the picture instead of a text-only reduction of the message (`Endpoint::resend_dm_bubble`). `ConversationStore.stageOutboundAttachment` survives only as an optimistic-render accelerator for a bubble that has no image of its own. `mergeHistory` treats the persisted transcript as the durable truth: a hydrated duplicate whose image the shown copy lacks patches it in, rather than being dropped wholesale.
 - **Retained images are bounded** (`outbox::ATTACHMENT_BUBBLE_CAP`, 16): a bubble releases its bytes the moment it goes terminal -- silently at `delivered` (the transcript holds a copy) and flagged `attachment_dropped` at `failed` (nothing else does, so the shell renders an explicit "photo not kept" note). Past the cap an image send is REFUSED (`ChatError::OutboxAttachmentsFull`) rather than accepted without its picture.
 
-<!-- arch: id=chat-attachments glob=crates/fetchit-chat/src/attachment.rs crates/fetchit-ffi/src/attachment_ffi.rs apps/fetchit-android/app/src/main/java/io/etchit/fetchit/chat/ChatImageAttachment.kt apps/fetchit-desktop/src/chat/imageAttach.ts verified=51ed630 -->
+<!-- arch: id=chat-attachments glob=crates/fetchit-chat/src/attachment.rs crates/fetchit-ffi/src/attachment_ffi.rs apps/fetchit-android/app/src/main/java/io/etchit/fetchit/chat/ChatImageAttachment.kt apps/fetchit-desktop/src/chat/imageAttach.ts verified=5220d5e -->
 
 ## Shells
 

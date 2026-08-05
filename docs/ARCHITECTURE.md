@@ -205,8 +205,8 @@ ever attached without a separate explicit choice.
 **Locked by:** wire types it sends: `crates/fetchit-relay-proto/**`; denylist
 schema it gates on: `crates/fetchit-trust-types/**`.
 
-<!-- arch: id=fetchit-chat glob=crates/fetchit-chat/** verified=bb7a046 -->
-_Last verified: 2026-08-04 (`bb7a046`) -- bob._
+<!-- arch: id=fetchit-chat glob=crates/fetchit-chat/** verified=5220d5e -->
+_Last verified: 2026-08-05 (`5220d5e`) -- bob._
 
 ## fetchit-relay-proto
 
