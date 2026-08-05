@@ -2327,6 +2327,43 @@ impl ChatClient {
         })
     }
 
+    /// Report a fediverse account to the community trust service for
+    /// moderator review.
+    ///
+    /// `actor_url` is the account's canonical actor URL (a profile
+    /// sheet's `actorUrl`, a following row's `targetActorUrl`).
+    /// `reason` is one of the `snake_case` report kinds -- `csam`,
+    /// `violence_threat`, `harassment`, `spam`, `doxxing`,
+    /// `abusive_content`, `other` -- and `comment` is the optional
+    /// free text the reporter typed (empty string when they typed
+    /// none).
+    ///
+    /// Reporting is NOT blocking: it asks moderators to look, and only
+    /// a reviewer promotes an account onto the signed denylist. The
+    /// local block affordance is the instant remedy and is unaffected.
+    ///
+    /// Like `fedi_profile`, this does not require a minted handle -- a
+    /// user who has not opted in to posting must still be able to
+    /// report what they are shown. The reporter's agent id rides along
+    /// when chat state is wired.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] for an unknown `reason`, an actor URL
+    /// that fails canonicalization, or an over-long comment;
+    /// [`ChatFfiError`] when the trust service is unreachable or
+    /// rejects the report.
+    pub async fn fedi_report(
+        &self,
+        actor_url: String,
+        reason: String,
+        comment: String,
+    ) -> Result<(), ChatFfiError> {
+        self.inner
+            .report_actor_url(&actor_url, &reason, &comment)
+            .await
+            .map_err(ChatFfiError::from)
+    }
+
     /// Like the feed post at `object_url`, authored by `author_url`:
     /// record it durably on this device and deliver a signed `Like` to
     /// the author's inbox. Requires a minted handle.

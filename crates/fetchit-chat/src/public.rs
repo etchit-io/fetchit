@@ -56,6 +56,35 @@ pub async fn check_actor_url_denylist(
     Ok(())
 }
 
+/// [`check_actor_url_denylist`] for callers that may not have a
+/// denylist wired at all.
+///
+/// `None` is the not-installed case (a client built before
+/// `install_m3_denylist`, or a shell that never installs one) and passes
+/// — fail-open, matching the "empty cache returns `false`" semantics the
+/// published manifest is the source of truth for. A wired denylist gates
+/// exactly as [`check_actor_url_denylist`] does, degenerate-input
+/// fail-closed included.
+///
+/// This is the whole body of `Client::gate_actor_url`; it lives here as
+/// a free function so every gated surface (the fediverse read feed, the
+/// profile/lookup path, the inbound follow-accept loop) shares one
+/// implementation that is testable against a stub without standing up a
+/// `Client`.
+///
+/// # Errors
+/// Surfaces [`ChatError::DeniedActor`] when a wired denylist blocks
+/// `actor_url` or the URL cannot be canonicalized.
+pub async fn check_optional_actor_url_denylist(
+    denylist: Option<&dyn DenylistCheck>,
+    actor_url: &str,
+) -> Result<(), ChatError> {
+    match denylist {
+        Some(dl) => check_actor_url_denylist(dl, actor_url).await,
+        None => Ok(()),
+    }
+}
+
 /// Pre-flight gate for a full [`PublicPost`] — checks every
 /// fediverse-side actor URL the post carries at the chat layer.
 ///
@@ -114,18 +143,21 @@ pub async fn check_mention_denylist(
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use async_trait::async_trait;
     use std::collections::HashSet;
     use std::sync::Mutex;
 
-    struct StubDenylist {
+    /// Actor-URL denylist stub. Shared with the other modules whose
+    /// gates run over actor URLs (the read feed) so they all pin the
+    /// same canonical-form matching behaviour.
+    pub(crate) struct StubDenylist {
         actor_urls: Mutex<HashSet<String>>,
     }
 
     impl StubDenylist {
-        fn new<I, S>(blocked: I) -> Self
+        pub(crate) fn new<I, S>(blocked: I) -> Self
         where
             I: IntoIterator<Item = S>,
             S: Into<String>,
@@ -209,6 +241,45 @@ mod tests {
                 "{degenerate} must fail closed"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn optional_gate_passes_when_no_denylist_is_installed() {
+        // Fail-open is the not-installed contract: a client with no
+        // consumer wired must still reach every actor.
+        check_optional_actor_url_denylist(None, "https://attacker.example/users/eve")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn optional_gate_blocks_through_a_wired_denylist() {
+        let d = StubDenylist::new(["https://attacker.example/users/eve"]);
+        assert!(
+            check_optional_actor_url_denylist(Some(&d), "https://attacker.example/users/eve")
+                .await
+                .is_err()
+        );
+        check_optional_actor_url_denylist(Some(&d), "https://mastodon.example/users/alice")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn optional_gate_keeps_the_canonicalizing_and_fail_closed_rules() {
+        let d = StubDenylist::new(["https://attacker.example/users/eve"]);
+        assert!(
+            check_optional_actor_url_denylist(Some(&d), "https://attacker.example/users/eve/")
+                .await
+                .is_err(),
+            "a trailing slash must not bypass the blocklist",
+        );
+        assert!(
+            check_optional_actor_url_denylist(Some(&d), "https://attacker.example/users/eve?x=1")
+                .await
+                .is_err(),
+            "degenerate ids fail closed",
+        );
     }
 
     #[tokio::test]

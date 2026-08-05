@@ -61,6 +61,8 @@ async fn start_limited(register_burst: u32, register_per_min: u32) -> (SocketAdd
         register_burst,
         register_per_min,
         trusted_proxy_hops: 0,
+        denylist_url: None,
+        denylist_cache: None,
     };
     let (router, _state) = Server::new(config, store.clone()).router();
     tokio::spawn(async move {

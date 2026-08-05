@@ -761,6 +761,45 @@ fn fanout_targets_from_record(
     }
 }
 
+/// Drop every fanout target whose agent id is on the community denylist
+/// (#342).
+///
+/// The `Endpoint::send` gate checks the conversation ANCHOR only. Device
+/// expansion then turns that one agent id into every device on the
+/// recipient's `PairRecordV4`, and each of those is a distinct,
+/// separately-blockable agent id: without this filter a denylisted
+/// device still receives a sealed copy of every DM sent to any of its
+/// siblings. Filtering the expanded set is what makes the block cover
+/// the account rather than one leaf of it.
+///
+/// No denylist wired (`None`) returns the targets untouched -- fail-open,
+/// matching every other chat-layer gate. An empty result is possible and
+/// meaningful: the caller turns it into [`ChatError::Denied`] rather than
+/// silently sending to nobody.
+async fn retain_undenylisted_targets(
+    denylist: Option<&Arc<dyn crate::denylist::DenylistCheck>>,
+    targets: Vec<FanoutTarget>,
+) -> Vec<FanoutTarget> {
+    let Some(denylist) = denylist else {
+        return targets;
+    };
+    let mut kept = Vec::with_capacity(targets.len());
+    for target in targets {
+        if denylist.is_blocked(&target.agent.0).await {
+            // Debug, not warn: on a multi-device account this fires once
+            // per send per blocked device, and it is the expected
+            // steady state after a block, not an anomaly.
+            log::debug!(
+                "[chat] fanout: skipping denylisted device {}",
+                target.agent.0
+            );
+            continue;
+        }
+        kept.push(target);
+    }
+    kept
+}
+
 /// The relay's HTTP(S) REST base (scheme + authority, path reset to `/`) for a
 /// pair-record GET, derived from a rendezvous relay URL. Rendezvous hints carry
 /// the WebSocket URL (e.g. `wss://relay.example/v1/ws`), but the pair-record
@@ -948,7 +987,9 @@ impl<'a> Endpoint<'a> {
     /// is available for the recipient or the client was built in
     /// REST-only mode without chat-encryption state;
     /// [`ChatError::Denied`] when the recipient is on the wired
-    /// denylist (M3 federation core).
+    /// denylist (M3 federation core) — raised both for the conversation
+    /// anchor and when the device fan-out has no unblocked target left
+    /// (#342).
     // Cohesive DM fanout: seal once, deliver best-effort per device, anchor the
     // thread once on the to-agent conversation; the per-device error handling +
     // anchor logic put it a few lines over the limit.
@@ -1026,7 +1067,28 @@ impl<'a> Endpoint<'a> {
         // + `ensureDm` over contacted peers), not by enumerating engine convs,
         // and the user never interacts with a sibling agent directly -- so the
         // user sees exactly one thread per contact regardless of device count.
-        let targets = self.fanout_targets(to).await;
+        //
+        // #342: the anchor gate at the top of `send` only ever saw `to`.
+        // The device expansion below reaches OTHER agent-ids -- siblings
+        // of the same account -- and each is denylistable in its own
+        // right, so every expanded target is re-gated here. Filtering
+        // after the expansion (rather than gating inside it) keeps
+        // `fanout_targets` purely about the device fabric.
+        let targets =
+            retain_undenylisted_targets(self.denylist, self.fanout_targets(to).await).await;
+        // Nothing left to deliver to. `to` is always among the expanded
+        // targets and was unblocked a few lines up, so this needs the
+        // denylist to have CHANGED in between -- a poll-loop refresh
+        // landing mid-send is exactly that window. Raise the same typed
+        // refusal the anchor check raises: a caller cannot tell a
+        // fully-blocked account from a blocked conversation partner, and
+        // a newly-blocked recipient never gets a sealed copy just
+        // because the block arrived one await too late.
+        if targets.is_empty() {
+            return Err(ChatError::Denied {
+                agent_id_hex: to.0.clone(),
+            });
+        }
         // Per-device delivery is best-effort: a failure reaching -- or
         // establishing the conversation for -- one device must NOT abort the
         // fanout to the others. With history anchored on `to`, a fail-fast on a
@@ -3074,6 +3136,95 @@ mod tests {
             )),
             vec![to_unlisted]
         );
+    }
+
+    /// Build the fanout target list for `agents`, device-shaped (the
+    /// per-device expansion is what #342 is about).
+    fn targets_for(agents_hex: &[String]) -> Vec<FanoutTarget> {
+        agents_hex
+            .iter()
+            .map(|a| FanoutTarget {
+                agent: AgentId(a.clone()),
+                device: Some(fetchit_relay_proto::pair_record::DeviceEntryV4 {
+                    agent_id_hex: a.clone(),
+                    ml_dsa_pubkey_b64: "AA".to_string(),
+                    kem_pubkey_b64: "AA".to_string(),
+                    advertised_relays: vec![],
+                    cert_b64: "AA".to_string(),
+                    added_at_ms: 0,
+                    primary: false,
+                }),
+            })
+            .collect()
+    }
+
+    /// #342: the send gate only checks the conversation anchor, so a
+    /// denylisted SIBLING device of an unblocked contact used to keep
+    /// receiving a sealed copy of every DM. The expanded set is filtered,
+    /// and only the blocked leaf drops.
+    #[tokio::test]
+    async fn denylisted_sibling_device_gets_no_sealed_copy() {
+        let anchor = "bb".repeat(32);
+        let blocked_sibling = "cc".repeat(32);
+        let other_sibling = "aa".repeat(32);
+        let all = vec![
+            other_sibling.clone(),
+            anchor.clone(),
+            blocked_sibling.clone(),
+        ];
+
+        let denylist: Arc<dyn crate::denylist::DenylistCheck> =
+            Arc::new(crate::denylist::tests::StaticDenylist::new([
+                blocked_sibling.clone(),
+            ]));
+        let kept = agents(retain_undenylisted_targets(Some(&denylist), targets_for(&all)).await);
+        assert_eq!(
+            kept,
+            vec![AgentId(other_sibling), AgentId(anchor)],
+            "only the denylisted device may drop, and order is preserved",
+        );
+    }
+
+    /// Every device blocked leaves nothing to deliver to. The caller
+    /// turns the empty set into the same `ChatError::Denied` the anchor
+    /// check raises, so a fully-blocked account is indistinguishable
+    /// from a blocked conversation partner.
+    #[tokio::test]
+    async fn every_device_blocked_filters_to_nothing() {
+        let devices: Vec<String> = vec!["aa".repeat(32), "bb".repeat(32)];
+        let denylist: Arc<dyn crate::denylist::DenylistCheck> =
+            Arc::new(crate::denylist::tests::StaticDenylist::new(devices.clone()));
+        let kept = retain_undenylisted_targets(Some(&denylist), targets_for(&devices)).await;
+        assert!(kept.is_empty(), "an all-blocked account has no targets");
+    }
+
+    /// No denylist wired: the expansion is passed through untouched.
+    /// Fail-open is the contract every other chat-layer gate keeps.
+    #[tokio::test]
+    async fn no_denylist_leaves_the_fanout_untouched() {
+        let devices: Vec<String> = vec!["aa".repeat(32), "bb".repeat(32)];
+        let kept = agents(retain_undenylisted_targets(None, targets_for(&devices)).await);
+        assert_eq!(
+            kept,
+            vec![AgentId(devices[0].clone()), AgentId(devices[1].clone())],
+        );
+    }
+
+    /// The filter must not confuse an agent-id block with an actor-URL
+    /// block: it asks `is_blocked` (agent kind) only, matching the
+    /// anchor gate it extends.
+    #[tokio::test]
+    async fn filter_matches_on_the_agent_id_exactly() {
+        let listed = "aa".repeat(32);
+        let unlisted = "ab".repeat(32);
+        let denylist: Arc<dyn crate::denylist::DenylistCheck> = Arc::new(
+            crate::denylist::tests::StaticDenylist::new([listed.clone()]),
+        );
+        let kept = agents(
+            retain_undenylisted_targets(Some(&denylist), targets_for(&[listed, unlisted.clone()]))
+                .await,
+        );
+        assert_eq!(kept, vec![AgentId(unlisted)]);
     }
 
     #[test]

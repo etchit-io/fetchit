@@ -1278,6 +1278,7 @@ class ChatModeView(
                         PopupMenu(context, anchor).apply {
                             menu.add(context.getString(R.string.fedi_unfollow))
                             menu.add(context.getString(R.string.fedi_block))
+                            menu.add(context.getString(R.string.fedi_report))
                             setOnMenuItemClickListener { item ->
                                 when (item.title) {
                                     context.getString(R.string.fedi_unfollow) ->
@@ -1286,6 +1287,10 @@ class ChatModeView(
                                         blockStore.block(atHandle)
                                         snackbar(context.getString(R.string.fedi_blocked, atHandle))
                                         renderBlocked()
+                                    }
+                                    context.getString(R.string.fedi_report) -> {
+                                        dialog.dismiss()
+                                        showReportDialog(e.targetActorUrl, atHandle)
                                     }
                                 }
                                 true
@@ -2918,6 +2923,7 @@ class ChatModeView(
                         PopupMenu(context, anchor).apply {
                             menu.add(context.getString(R.string.fedi_unfollow))
                             menu.add(context.getString(R.string.fedi_block))
+                            menu.add(context.getString(R.string.fedi_report))
                             setOnMenuItemClickListener { item ->
                                 when (item.title) {
                                     context.getString(R.string.fedi_unfollow) ->
@@ -2927,6 +2933,8 @@ class ChatModeView(
                                         snackbar(context.getString(R.string.fedi_blocked, atHandle))
                                         renderBlocked()
                                     }
+                                    context.getString(R.string.fedi_report) ->
+                                        showReportDialog(e.targetActorUrl, atHandle)
                                 }
                                 true
                             }
@@ -3273,6 +3281,102 @@ class ChatModeView(
                 dialog.dismiss()
             },
         )
+        // Report sits below block on purpose: blocking is the instant,
+        // local remedy and should be the easier reach; reporting asks
+        // moderators to look and is the slower, community path.
+        box.addView(
+            action(context.getString(R.string.fedi_report)) {
+                dialog.dismiss()
+                showReportDialog(profile.actorUrl, atHandle)
+            },
+        )
+    }
+
+    /**
+     * Report the account at [actorUrl] to the community moderators: pick
+     * a reason, optionally say more, send.
+     *
+     * [actorUrl] must be the account's actor URL, not a handle — the
+     * engine canonicalises it into the same `actor_url` form a denylist
+     * entry carries, so a promoted report matches the gate that reads
+     * it. Nothing is sent until the person taps send, and the result is
+     * reported honestly either way (a silent failure here would let
+     * someone believe abuse was reported when it was not).
+     */
+    private fun showReportDialog(actorUrl: String, atHandle: String) {
+        if (actorUrl.isBlank()) {
+            snackbar(context.getString(R.string.fedi_report_failed))
+            return
+        }
+        val px16 = (16 * context.resources.displayMetrics.density).toInt()
+        val px8 = px16 / 2
+        val box = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(px16, px8, px16, 0)
+        }
+        box.addView(TextView(context).apply {
+            text = context.getString(R.string.fedi_report_blurb)
+            textSize = 13f
+            setTextColor(themeColor(R.attr.fetchitAsh))
+            setPadding(0, 0, 0, px8)
+        })
+        val group = android.widget.RadioGroup(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+        FediReportReasons.OPTIONS.forEachIndexed { i, reason ->
+            group.addView(
+                android.widget.RadioButton(context).apply {
+                    id = i
+                    text = context.getString(reason.labelRes)
+                    setTextColor(themeColor(R.attr.fetchitBone))
+                },
+            )
+        }
+        // Pre-select nothing: the reason is the one thing the reporter
+        // must actually choose, and a default would get sent unread.
+        box.addView(group)
+        val comment = android.widget.EditText(context).apply {
+            hint = context.getString(R.string.fedi_report_comment_hint)
+            setTextColor(themeColor(R.attr.fetchitBone))
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            maxLines = 4
+        }
+        box.addView(comment)
+
+        val dialog = MaterialAlertDialogBuilder(context)
+            .setTitle(context.getString(R.string.fedi_report_title, atHandle))
+            .setView(box)
+            .setPositiveButton(R.string.fedi_report_send, null)
+            .setNegativeButton(context.getString(R.string.action_cancel), null)
+            .create()
+        dialog.show()
+        // Bound manually so an un-chosen reason keeps the dialog open
+        // rather than dismissing on a no-op.
+        dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener {
+            // RadioGroup reports NO_ID (-1) until something is checked,
+            // which `wireAt` turns into null rather than a default.
+            val reason = FediReportReasons.wireAt(group.checkedRadioButtonId)
+            if (reason == null) {
+                snackbar(context.getString(R.string.fedi_report_pick_reason))
+                return@setOnClickListener
+            }
+            dialog.dismiss()
+            sendReport(actorUrl, reason, comment.text?.toString().orEmpty())
+        }
+    }
+
+    /** Deliver one report, then say plainly whether it went. */
+    private fun sendReport(actorUrl: String, reason: String, comment: String) {
+        lifecycleScope.launch {
+            val gw = runCatching { connectWithFeedback() }.getOrElse { return@launch }
+            runCatching { gw.fediReport(actorUrl, reason, comment) }.fold(
+                onSuccess = { snackbar(context.getString(R.string.fedi_report_sent)) },
+                onFailure = { e ->
+                    snackbar(userFacingError(e, "fediReport", R.string.fedi_report_failed))
+                },
+            )
+        }
     }
 
     // ── fediverse thread (plaintext rails) ─────────────────────────────

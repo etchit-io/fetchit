@@ -2987,6 +2987,8 @@ dependencies = [
  "base64",
  "fetchit-fedi",
  "fetchit-relay-proto",
+ "fetchit-trust-client",
+ "fetchit-trust-types",
  "hex",
  "reqwest 0.12.28",
  "rsa",

@@ -59,6 +59,8 @@ async fn start() -> (SocketAddr, Store) {
         register_burst: 0,
         register_per_min: 0,
         trusted_proxy_hops: 0,
+        denylist_url: None,
+        denylist_cache: None,
     };
     let (router, _state) = Server::new(config, store.clone()).router();
     tokio::spawn(async move {

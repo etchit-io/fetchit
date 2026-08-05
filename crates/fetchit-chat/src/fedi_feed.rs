@@ -114,6 +114,20 @@ impl Client {
             .collect();
         let mut posts: Vec<FediFeedPost> = Vec::new();
         for entry in following.iter().take(FEED_ACCOUNT_CAP) {
+            // A denylisted account is skipped WHOLE — before the actor
+            // fetch, so its server never sees a request from this
+            // device, and therefore before the outbox fetch that would
+            // pull its posts into the feed. A follow row can outlive the
+            // block (the row lives at the bridge, the list at the trust
+            // service), so the gate has to run per refresh rather than
+            // only at follow time. Fail-open with no denylist installed.
+            if self.gate_actor_url(&entry.target_actor_url).await.is_err() {
+                log::info!(
+                    "[fedi] feed: skipping denylisted account {}",
+                    entry.target_actor_url
+                );
+                continue;
+            }
             let Ok(actor_url) = entry.target_actor_url.parse::<url::Url>() else {
                 continue;
             };
@@ -255,6 +269,56 @@ mod tests {
             ["https://m.example/@g/1".to_owned()].into_iter().collect();
         assert!(liked.contains("https://m.example/@g/1"));
         assert!(!liked.contains("https://m.example/@g/2"));
+    }
+
+    /// The exact per-account predicate `fetch_fedi_feed` runs before it
+    /// touches a followed account's server: a blocked actor is dropped
+    /// from the round, everyone else is pulled.
+    #[tokio::test]
+    async fn denylisted_accounts_are_dropped_before_any_fetch() {
+        use crate::public::{check_optional_actor_url_denylist, tests::StubDenylist};
+
+        let d = StubDenylist::new(["https://attacker.example/users/eve"]);
+        let following = [
+            "https://mastodon.example/users/alice",
+            "https://attacker.example/users/eve",
+            // Trailing-slash variant of the blocked actor: the gate
+            // canonicalizes, so it must not slip through as a second
+            // fetchable account.
+            "https://attacker.example/users/eve/",
+            "https://fosstodon.org/users/happyborg",
+        ];
+        let mut kept = Vec::new();
+        for url in following {
+            if check_optional_actor_url_denylist(Some(&d), url)
+                .await
+                .is_ok()
+            {
+                kept.push(url);
+            }
+        }
+        assert_eq!(
+            kept,
+            vec![
+                "https://mastodon.example/users/alice",
+                "https://fosstodon.org/users/happyborg",
+            ],
+        );
+    }
+
+    /// No denylist installed means no account is skipped — the feed must
+    /// not silently empty itself on a client that never installed a
+    /// consumer.
+    #[tokio::test]
+    async fn no_denylist_installed_keeps_every_account() {
+        use crate::public::check_optional_actor_url_denylist;
+
+        for url in [
+            "https://mastodon.example/users/alice",
+            "https://attacker.example/users/eve",
+        ] {
+            check_optional_actor_url_denylist(None, url).await.unwrap();
+        }
     }
 
     #[test]

@@ -73,19 +73,42 @@ pub struct BridgeState {
     /// public avatar GET is deliberately outside it — whole instances
     /// fetch avatars from one egress IP.
     pub rate_limiter_avatar: RateLimiter,
+    /// Signed community denylist consulted by the inbound federation
+    /// gate. `None` disables the gate (fail-open); see
+    /// [`crate::denylist`].
+    pub denylist: Option<Arc<dyn fetchit_trust_types::DenylistQuery>>,
 }
 
 /// The bridge server.
 pub struct Server {
     config: BridgeConfig,
     store: Store,
+    denylist: Option<Arc<dyn fetchit_trust_types::DenylistQuery>>,
 }
 
 impl Server {
-    /// Build a server from a config + an opened store.
+    /// Build a server from a config + an opened store. The inbound
+    /// denylist gate is off until [`Self::with_denylist`] wires it.
     #[must_use]
     pub fn new(config: BridgeConfig, store: Store) -> Self {
-        Self { config, store }
+        Self {
+            config,
+            store,
+            denylist: None,
+        }
+    }
+
+    /// Wire the community denylist the inbound federation gate consults.
+    ///
+    /// Separate from [`Self::new`] because building the consumer spawns
+    /// a background poll loop (so it needs a Tokio runtime), while
+    /// `new` + [`Self::router`] are sync and used by every hermetic
+    /// test. Production assembles it in `main` via
+    /// [`crate::denylist::install`].
+    #[must_use]
+    pub fn with_denylist(mut self, denylist: Arc<dyn fetchit_trust_types::DenylistQuery>) -> Self {
+        self.denylist = Some(denylist);
+        self
     }
 
     /// Assemble the axum router and shared state.
@@ -110,6 +133,7 @@ impl Server {
             rate_limiter,
             rate_limiter_inbox,
             rate_limiter_avatar,
+            denylist: self.denylist,
         });
         let router = Router::new()
             .route("/health", get(routes::health::health))

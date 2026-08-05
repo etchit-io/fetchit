@@ -336,6 +336,25 @@
     <string name="fedi_profile_requested">requested · tap to cancel</string>
     <string name="fedi_profile_following">following ✓ · tap to unfollow</string>
     <string name="fedi_profile_blocked_note">you\'ve blocked this account on this device.</string>
+    <!-- Report to moderators. Blocking is instant and local; reporting
+         asks the community moderators to look, so the copy says so
+         plainly and never promises an outcome. The `reason` values sent
+         over the FFI are the snake_case kinds the trust service knows;
+         these strings are only what the person reading them sees. -->
+    <string name="fedi_report">report…</string>
+    <string name="fedi_report_title">report %1$s</string>
+    <string name="fedi_report_blurb">this goes to the moderators for review. it doesn\'t block them — use block for that.</string>
+    <string name="fedi_report_comment_hint">anything else we should know? (optional)</string>
+    <string name="fedi_report_pick_reason">pick a reason first</string>
+    <string name="fedi_report_send">send report</string>
+    <string name="fedi_report_sent">report sent — moderators will take a look</string>
+    <string name="fedi_report_failed">couldn\'t send that report — try again in a moment</string>
+    <string name="fedi_report_reason_csam">child sexual abuse material</string>
+    <string name="fedi_report_reason_violence">threats of violence</string>
+    <string name="fedi_report_reason_harassment">harassment</string>
+    <string name="fedi_report_reason_spam">spam</string>
+    <string name="fedi_report_reason_doxxing">sharing private information</string>
+    <string name="fedi_report_reason_abusive">abusive content</string>
     <!-- Like toggle on feed posts. The glyph is the control; the
          content description is what a screen reader announces. -->
     <string name="feed_like_glyph">♡</string>

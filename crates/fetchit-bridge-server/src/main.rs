@@ -14,7 +14,15 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let config = BridgeConfig::from_env()?;
     let store = Store::open(&config.db_path)?;
+    // Inside the runtime, so the consumer's poll loop has somewhere to
+    // live; before `run`, so the gate is enforcing the cached snapshot
+    // from the first accepted delivery onward.
+    let denylist = fetchit_bridge_server::denylist::install(&config)?;
     let server = Server::new(config, store);
+    let server = match denylist {
+        Some(d) => server.with_denylist(d),
+        None => server,
+    };
     server.run().await?;
     Ok(())
 }

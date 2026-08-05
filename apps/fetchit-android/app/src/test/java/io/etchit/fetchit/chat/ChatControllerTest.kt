@@ -163,6 +163,12 @@ class FakeGateway : ChatGateway {
     override suspend fun fediFeed(): List<FediPostFfi> = emptyList()
     override suspend fun fediProfile(target: String): FediProfileFfi =
         FediProfileFfi(target, target, null, "", null)
+
+    /** Records what a report would have sent, so a test can assert it. */
+    var reported: Triple<String, String, String>? = null
+    override suspend fun fediReport(actorUrl: String, reason: String, comment: String) {
+        reported = Triple(actorUrl, reason, comment)
+    }
     override suspend fun fediLike(objectUrl: String, authorUrl: String): Boolean = true
     override suspend fun fediUnlike(objectUrl: String, authorUrl: String): Boolean = true
     override suspend fun fediSyncInbox(): UInt = 0u
@@ -603,6 +609,8 @@ class ChatControllerTest {
                 UnfollowReportFfi(delivered = true, removed = true)
             override suspend fun fediFeed(): List<FediPostFfi> = emptyList()
             override suspend fun fediProfile(target: String): FediProfileFfi =
+                throw UnsupportedOperationException()
+            override suspend fun fediReport(actorUrl: String, reason: String, comment: String): Unit =
                 throw UnsupportedOperationException()
             override suspend fun fediLike(objectUrl: String, authorUrl: String): Boolean = true
             override suspend fun fediUnlike(objectUrl: String, authorUrl: String): Boolean = true
