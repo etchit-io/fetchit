@@ -525,6 +525,18 @@
     <string name="chat_msg_failed_retry">⚠ tap to retry</string>
     <string name="chat_retrying">retrying…</string>
 
+    <!-- Chat: inline photo attachments (DM only) -->
+    <string name="chat_attachment_add_desc">attach a photo</string>
+    <string name="chat_attachment_remove_desc">remove the attached photo</string>
+    <string name="chat_attachment_staged_desc">photo waiting to be sent</string>
+    <string name="chat_attachment_desc">photo in this message</string>
+    <string name="chat_attachment_full_desc">photo, full screen</string>
+    <string name="chat_attachment_working">preparing the photo…</string>
+    <string name="chat_attachment_staged">%1$d×%2$d · %3$d KB</string>
+    <string name="chat_attachment_unreadable">couldn\'t read that picture — try another</string>
+    <string name="chat_attachment_too_big">that picture won\'t fit in a message — share it as an autonomi:// link instead</string>
+    <string name="chat_photo_notify">Photo</string>
+
     <!-- Chat: display name setting -->
     <string name="chat_display_name">chat display name</string>
     <string name="chat_display_name_hint">shown to contacts (optional)</string>

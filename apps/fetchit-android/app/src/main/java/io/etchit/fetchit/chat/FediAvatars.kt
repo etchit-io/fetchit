@@ -178,14 +178,23 @@ class FediAvatars(private val targetPx: Int) {
         /**
          * Bounds-checked, subsampled decode. Null for anything that does not
          * decode to a sane bitmap.
+         *
+         * [maxSourcePx] is the largest declared dimension accepted; it
+         * defaults to the avatar bound and is raised only by the chat
+         * attachment path, where the source is a photo the user picked on
+         * this device rather than an image fetched from a stranger.
          */
-        fun decodeBounded(bytes: ByteArray, targetPx: Int): Bitmap? {
+        fun decodeBounded(
+            bytes: ByteArray,
+            targetPx: Int,
+            maxSourcePx: Int = MAX_SOURCE_PX,
+        ): Bitmap? {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds) }
             val w = bounds.outWidth
             val h = bounds.outHeight
             if (w <= 0 || h <= 0) return null
-            if (w > MAX_SOURCE_PX || h > MAX_SOURCE_PX) return null
+            if (w > maxSourcePx || h > maxSourcePx) return null
             val opts = BitmapFactory.Options().apply {
                 inSampleSize = sampleSize(w, h, targetPx)
             }

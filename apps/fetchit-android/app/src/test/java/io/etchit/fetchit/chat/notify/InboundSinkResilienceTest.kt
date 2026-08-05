@@ -35,8 +35,8 @@ class InboundSinkResilienceTest {
             htmlStripper = { it },
             onInbound = { error("notifier blew up") },
         )
-        gw.events.send(ChatEventFfi.Dm(peer, "first", "m1"))
-        gw.events.send(ChatEventFfi.Dm(peer, "second", "m2"))
+        gw.events.send(ChatEventFfi.Dm(peer, "first", "m1", null))
+        gw.events.send(ChatEventFfi.Dm(peer, "second", "m2", null))
         gw.events.send(null)
         pump.join()
 

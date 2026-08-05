@@ -1,5 +1,6 @@
 package io.etchit.fetchit.chat
 
+import uniffi.fetchit_ffi.ChatAttachmentFfi
 import uniffi.fetchit_ffi.ChatClient
 import uniffi.fetchit_ffi.ChatEventFfi
 import uniffi.fetchit_ffi.ChatHistoryMessageFfi
@@ -23,6 +24,30 @@ import uniffi.fetchit_ffi.FediThreadSummaryFfi
 import uniffi.fetchit_ffi.GoPrivateReportFfi
 import uniffi.fetchit_ffi.FollowReportFfi
 import uniffi.fetchit_ffi.PublishReportFfi
+
+/**
+ * The FFI shape of an inline image: RAW bytes both ways. Base64 is the
+ * message payload's wire encoding and is applied and stripped inside the
+ * engine boundary, so nothing above this line ever handles it.
+ */
+internal fun ChatAttachment.toFfi(): ChatAttachmentFfi = ChatAttachmentFfi(
+    mime = mime,
+    width = width.toUInt(),
+    height = height.toUInt(),
+    bytes = bytes,
+)
+
+/**
+ * The shell shape of an attachment the FFI handed back. Anything that
+ * reached here already passed the engine's MIME / dimension / size checks;
+ * an attachment that failed them arrives as null and never gets here.
+ */
+internal fun ChatAttachmentFfi.toModel(): ChatAttachment = ChatAttachment(
+    mime = mime,
+    width = width.toInt(),
+    height = height.toInt(),
+    bytes = bytes,
+)
 
 /** Seam over the uniffi surface so controller + UI are testable without a relay. */
 interface ChatGateway {
@@ -65,8 +90,20 @@ interface ChatGateway {
      * retries). The bubble's lifecycle -- the optimistic `Sending` echo, then
      * `Delivered` or `Failed` -- arrives as [ChatEventFfi.Outbox] events through
      * [nextEvent], NOT via this return value.
+     *
+     * [attachment] is an optional inline image; it rides inside the same
+     * sealed payload as [body], so it is end-to-end encrypted exactly like
+     * the text. A message may be an image with no text, but not empty on
+     * both counts. The image is NOT stored on the durable bubble, so an
+     * engine-driven resend goes out as text -- the shell holds its own copy
+     * for the optimistic echo (see [ChatController.stageOutboundAttachment]).
      */
-    suspend fun enqueueDm(to: String, body: String, senderName: String): String
+    suspend fun enqueueDm(
+        to: String,
+        body: String,
+        senderName: String,
+        attachment: ChatAttachment? = null,
+    ): String
 
     /**
      * Start the engine outbox retry driver under [displayName]. The controller
@@ -453,8 +490,12 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
 
     override suspend fun pairShareUri(): String = inner.pairShareUri()
     override suspend fun importPairUri(uri: String) = inner.importPairUri(uri)
-    override suspend fun enqueueDm(to: String, body: String, senderName: String): String =
-        inner.enqueueDm(to, body, senderName)
+    override suspend fun enqueueDm(
+        to: String,
+        body: String,
+        senderName: String,
+        attachment: ChatAttachment?,
+    ): String = inner.enqueueDm(to, body, senderName, attachment?.toFfi())
     override fun startOutbox(displayName: String) = inner.startOutbox(displayName)
     override suspend fun outboxSnapshot(): List<OutboxBubbleFfi> = inner.outboxSnapshot()
     override fun retryOutbox() = inner.retryOutbox()

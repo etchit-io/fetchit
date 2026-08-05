@@ -34,6 +34,20 @@
         android:orientation="vertical"
         android:padding="10dp">
 
+        <!-- Inline image attachment (DM only). Sized by the adapter from
+             the width/height that rode with the bytes, so the row reserves
+             the right shape before anything decodes and the list does not
+             jump when it does. Gone on a text-only message. -->
+        <ImageView
+            android:id="@+id/messageImage"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="6dp"
+            android:adjustViewBounds="true"
+            android:scaleType="fitCenter"
+            android:background="?attr/fetchitInk3"
+            android:visibility="gone" />
+
         <TextView
             android:id="@+id/messageBubble"
             android:layout_width="wrap_content"

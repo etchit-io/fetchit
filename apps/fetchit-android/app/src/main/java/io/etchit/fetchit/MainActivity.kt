@@ -21,6 +21,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import io.etchit.fetchit.chat.ChatImageAttachment
 import io.etchit.fetchit.chat.ChatModeView
 import io.etchit.fetchit.chat.ProfilePicture
 import io.etchit.fetchit.databinding.ActivityMainBinding
@@ -164,6 +165,15 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
     private val pickAvatarLauncher = registerForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri -> uri?.let(::onProfilePicturePicked) }
+
+    /**
+     * Photo picker for an inline chat image. Same permission-free system
+     * picker as the profile picture: the app is handed exactly the one
+     * image the user chose and never holds library access.
+     */
+    private val pickChatImageLauncher = registerForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri -> uri?.let(::onChatImagePicked) }
 
     /** Bytes waiting for the user to confirm a SAF destination — written
      *  on the matching launcher callback and cleared after. The save and
@@ -326,6 +336,7 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
             },
             onPickProfilePicture = ::pickProfilePicture,
             onRemoveProfilePicture = ::removeProfilePicture,
+            onPickChatImage = ::pickChatImage,
         )
 
         binding.fetchButton.setOnTapListener { onFetchClicked() }
@@ -810,6 +821,58 @@ class MainActivity : AppCompatActivity(), BookmarkSheet.Host {
         pickAvatarLauncher.launch(
             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
         )
+    }
+
+    /**
+     * Open the system photo picker for an inline chat image. Called by the
+     * DM composer's attach button; the picker is registered here because
+     * an activity-result contract has to be.
+     */
+    fun pickChatImage() {
+        pickChatImageLauncher.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+        )
+    }
+
+    /**
+     * Prepare the picked photo for sending, then hand it to the composer.
+     *
+     * Everything happens here, on the device, BEFORE a byte is sealed:
+     * [ChatImageAttachment.prepare] decodes, downscales (keeping the aspect
+     * ratio -- a shared photo is the content, not a cropped avatar) and
+     * RE-ENCODES to JPEG. That last step is the privacy-load-bearing one:
+     * a camera JPEG carries EXIF, and EXIF routinely carries GPS.
+     * Re-encoding keeps the pixels and drops everything else.
+     *
+     * A picture that will not fit the message cap at any rung is refused
+     * with the honest steer -- share it as an `autonomi://` link, which is
+     * what that path is for.
+     */
+    private fun onChatImagePicked(uri: android.net.Uri) {
+        lifecycleScope.launch {
+            snackId(R.string.chat_attachment_working)
+            val source = withContext(Dispatchers.IO) {
+                runCatching {
+                    contentResolver.openInputStream(uri)?.use { input ->
+                        ProfilePicture.readBounded(input, ChatImageAttachment.MAX_SOURCE_BYTES)
+                    }
+                }.getOrNull()
+            }
+            if (source == null) {
+                chatModeView.onChatImageRejected(tooBig = false)
+                return@launch
+            }
+            when (val prepared = withContext(Dispatchers.IO) {
+                ChatImageAttachment.prepare(source)
+            }) {
+                is ChatImageAttachment.Prepared.Ready ->
+                    chatModeView.onChatImagePrepared(prepared.attachment)
+                ChatImageAttachment.Prepared.TooLarge ->
+                    chatModeView.onChatImageRejected(tooBig = true)
+                ChatImageAttachment.Prepared.Unreadable ->
+                    chatModeView.onChatImageRejected(tooBig = false)
+            }
+        }
     }
 
     /** Remove the published profile picture, after a confirmation. */
