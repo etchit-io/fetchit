@@ -8,7 +8,7 @@
 //! `inflight` guard prevents the retry driver from re-firing a bubble whose
 //! send is already in progress.
 
-use super::{OutboxBubble, SendState, PRIOR_MESSAGE_ID_CAP};
+use super::{OutboxBubble, SendState, ATTACHMENT_BUBBLE_CAP, PRIOR_MESSAGE_ID_CAP};
 use crate::at_rest::{open_from_path, seal_to_path, MasterKey, ARGON_SALT_LEN};
 use crate::local_store::StoreLayout;
 use crate::send_state::SendFailure;
@@ -141,6 +141,28 @@ impl OutboxStore {
         self.inner.get(id)
     }
 
+    /// How many bubbles are currently holding attachment bytes.
+    ///
+    /// The quantity [`super::ATTACHMENT_BUBBLE_CAP`] bounds. Terminal
+    /// bubbles release their bytes as they transition, so this counts only
+    /// images that can still be re-sent.
+    #[must_use]
+    pub fn attachment_bubble_count(&self) -> usize {
+        self.inner
+            .values()
+            .filter(|b| b.attachment.is_some())
+            .count()
+    }
+
+    /// Is there room to retain one more attachment-bearing bubble?
+    ///
+    /// Checked by the enqueue path under the same lock it upserts with, so
+    /// two concurrent sends cannot both pass a cap with one slot left.
+    #[must_use]
+    pub fn has_attachment_capacity(&self) -> bool {
+        self.attachment_bubble_count() < ATTACHMENT_BUBBLE_CAP
+    }
+
     /// All bubbles, cloned (for the initial-render snapshot the shell
     /// reads before subscribing to live events).
     #[must_use]
@@ -251,6 +273,11 @@ impl OutboxStore {
                 .find(|b| b.matches_receipt(message_id))?;
             bubble.status = SendState::Delivered;
             bubble.state_changed_at_ms = received_at_ms;
+            // Terminal and confirmed arrived: the send that earned this
+            // receipt persisted a transcript entry carrying the image, so
+            // the outbox copy is dead weight. Released with no flag --
+            // nothing was lost (ATTACHMENT_BUBBLE_CAP rule 1).
+            bubble.release_attachment(false);
             bubble.clone()
         };
         self.flush();
@@ -296,6 +323,13 @@ impl OutboxStore {
                 if f.terminal && !bubble.status.reached_relay() {
                     bubble.status = SendState::Failed;
                     bubble.state_changed_at_ms = now_ms;
+                    // Terminal without ever sending: nothing retries this
+                    // bubble and no transcript entry was written, so this
+                    // WAS the last copy of the image. Release the bytes so
+                    // a dead message cannot hold a slot forever, and flag
+                    // it so the shell says so rather than rendering an
+                    // empty bubble (ATTACHMENT_BUBBLE_CAP rule 1).
+                    bubble.release_attachment(true);
                 }
             } else {
                 if let Some(new_id) = message_id {
@@ -453,6 +487,125 @@ mod tests {
         let decoded: fetchit_relay_proto::TransitEnvelope =
             postcard::from_bytes(&g.envelope).expect("sealed envelope bytes decode after reload");
         assert_eq!(decoded.ciphertext, vec![9, 9, 9]);
+    }
+
+    fn image(byte: u8) -> crate::attachment::Attachment {
+        crate::attachment::Attachment::from_raw("image/jpeg", 16, 16, &[byte; 2048]).unwrap()
+    }
+
+    #[test]
+    fn outbox_persists_a_dm_attachment_and_reply_anchor_across_reload() {
+        // The headline durability this lane adds: after a restart the
+        // bubble still knows the WHOLE message, so the sender's own thread
+        // can render the picture and a retry can re-send it.
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let m = test_master();
+        let mut s = OutboxStore::load(&layout, &m, 0, None);
+        s.upsert(bubble("b1", "a").with_dm_payload(Some(image(0x5A)), Some("m-parent".into())));
+        drop(s);
+
+        let s2 = OutboxStore::load(&layout, &m, 0, None);
+        let b = s2.get("b1").unwrap();
+        assert_eq!(b.reply_to_message_id.as_deref(), Some("m-parent"));
+        let att = b.attachment.as_ref().expect("image survives the reload");
+        assert_eq!(att.mime, "image/jpeg");
+        assert_eq!(att.validate().unwrap(), vec![0x5Au8; 2048]);
+    }
+
+    #[test]
+    fn a_delivered_bubble_releases_its_image_without_flagging_a_loss() {
+        // Terminal + confirmed arrived: the send persisted a transcript
+        // entry holding the image, so the outbox copy is dead weight.
+        let mut s = OutboxStore::new();
+        s.upsert(queued("b1", 1, Some("m1")).with_dm_payload(Some(image(1)), None));
+        assert_eq!(s.attachment_bubble_count(), 1);
+        s.mark_delivered("m1", 500).expect("receipt matches");
+        let b = s.get("b1").unwrap();
+        assert!(b.attachment.is_none(), "bytes released at Delivered");
+        assert!(
+            !b.attachment_dropped,
+            "nothing was lost, so nothing is announced"
+        );
+        assert_eq!(s.attachment_bubble_count(), 0, "the slot comes back");
+    }
+
+    #[test]
+    fn a_terminally_failed_bubble_releases_its_image_and_says_so() {
+        // Terminal WITHOUT ever sending: no transcript entry was written,
+        // so this bubble held the only copy. The bytes still go (a dead
+        // message must not hold a slot forever) but the shell is told.
+        let mut s = OutboxStore::new();
+        s.upsert(queued("b1", 0, None).with_dm_payload(Some(image(2)), None));
+        let denied = SendFailure::classify(&ChatError::Denied {
+            agent_id_hex: "aa".repeat(32),
+        });
+        let updated = s
+            .record_send_outcome("b1", None, Some(denied), 9)
+            .expect("bubble present");
+        assert_eq!(updated.status, SendState::Failed);
+        assert!(updated.attachment.is_none());
+        assert!(updated.attachment_dropped, "the shell can render the loss");
+        assert_eq!(s.attachment_bubble_count(), 0);
+    }
+
+    #[test]
+    fn a_retryable_failure_keeps_the_image_for_the_next_attempt() {
+        // A dropped socket leaves the message queued, and a queued bubble
+        // is the ONLY durable holder of an unsent image -- releasing here
+        // would destroy the user's picture.
+        let mut s = OutboxStore::new();
+        s.upsert(queued("b1", 0, None).with_dm_payload(Some(image(3)), Some("m0".into())));
+        let updated = s
+            .record_send_outcome("b1", None, Some(transport_failure()), 5)
+            .expect("bubble present");
+        assert_eq!(updated.status, SendState::Queued);
+        assert!(updated.attachment.is_some());
+        assert_eq!(updated.reply_to_message_id.as_deref(), Some("m0"));
+    }
+
+    #[test]
+    fn a_relay_accepted_dm_keeps_its_image_until_the_receipt_lands() {
+        // Sent is not terminal for a DM: it keeps retrying until a receipt
+        // arrives, so it must keep the payload those retries re-send.
+        let mut s = OutboxStore::new();
+        s.upsert(queued("b1", 0, None).with_dm_payload(Some(image(4)), None));
+        let sent = s
+            .record_send_outcome("b1", Some("m1".into()), None, 10)
+            .expect("bubble present");
+        assert_eq!(sent.status, SendState::Sent);
+        assert!(sent.attachment.is_some(), "still re-sendable, still held");
+        assert_eq!(s.attachment_bubble_count(), 1);
+        // ...and it goes the moment the receipt closes the message.
+        s.mark_delivered("m1", 20).expect("receipt matches");
+        assert_eq!(s.attachment_bubble_count(), 0);
+    }
+
+    #[test]
+    fn attachment_capacity_runs_out_exactly_at_the_cap() {
+        let mut s = OutboxStore::new();
+        for i in 0..ATTACHMENT_BUBBLE_CAP {
+            assert!(s.has_attachment_capacity(), "room at {i} of the cap");
+            s.upsert(
+                queued(&format!("b{i}"), i as u64, None).with_dm_payload(Some(image(0)), None),
+            );
+        }
+        assert_eq!(s.attachment_bubble_count(), ATTACHMENT_BUBBLE_CAP);
+        assert!(
+            !s.has_attachment_capacity(),
+            "the cap refuses the next image rather than dropping it"
+        );
+        // Text bubbles are never counted, so a full image backlog never
+        // blocks an ordinary message.
+        s.upsert(queued("text", 99, None));
+        assert_eq!(s.attachment_bubble_count(), ATTACHMENT_BUBBLE_CAP);
+        // And a single delivery hands a slot straight back.
+        s.record_send_outcome("b0", Some("m0".into()), None, 1);
+        s.mark_delivered("m0", 2).expect("receipt matches");
+        assert!(
+            s.has_attachment_capacity(),
+            "terminal bubbles give their slots back, so the cap cannot wedge"
+        );
     }
 
     #[test]

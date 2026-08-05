@@ -570,6 +570,7 @@
     <string name="chat_attachment_staged">%1$d×%2$d · %3$d KB</string>
     <string name="chat_attachment_unreadable">couldn\'t read that picture — try another</string>
     <string name="chat_attachment_too_big">that picture won\'t fit in a message — share it as an autonomi:// link instead</string>
+    <string name="chat_attachment_dropped">photo not kept — this message never sent</string>
     <string name="chat_photo_notify">Photo</string>
 
     <!-- Chat: display name setting -->

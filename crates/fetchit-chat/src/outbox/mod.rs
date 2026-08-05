@@ -107,12 +107,80 @@ pub struct OutboxBubble {
     /// sealed before group durability landed load with `None`.
     #[serde(default)]
     pub group: Option<GroupOutbound>,
+    /// Inline image this DM carries, retained so a resend delivers the
+    /// SAME message the user composed instead of a text-only degradation
+    /// (for a caption-less photo, an empty one).
+    ///
+    /// `None` on a text-only DM, on a group fan-out copy (the wire payload
+    /// there is the sealed `group.envelope`), on a bubble restored from a
+    /// vault sealed before full-fidelity retry, and on a bubble whose
+    /// bytes were released at a terminal state -- see
+    /// [`Self::attachment_dropped`] and [`ATTACHMENT_BUBBLE_CAP`].
+    ///
+    /// While the bubble is [`SendState::Queued`] this is the ONLY durable
+    /// copy of the image: a send that never succeeded persists no
+    /// transcript entry, so nothing else on disk holds the bytes.
+    #[serde(default)]
+    pub attachment: Option<crate::attachment::Attachment>,
+    /// Logical message id this DM is a reply to, retained for the same
+    /// reason as [`Self::attachment`]: a resend that dropped it would
+    /// deliver an unthreaded copy of a threaded message. `None` on a
+    /// non-reply and on a group fan-out copy.
+    #[serde(default)]
+    pub reply_to_message_id: Option<String>,
+    /// `true` when this bubble carried an attachment whose bytes the
+    /// outbox has since released AND no transcript entry is known to hold
+    /// them -- i.e. the message failed terminally, so it was never sent
+    /// and never persisted. A shell renders it as an explicit "image not
+    /// kept" affordance; the alternative is an empty bubble that silently
+    /// lies about what the user sent.
+    ///
+    /// Deliberately NOT set when the bytes are released at
+    /// [`SendState::Delivered`]: that message reached the recipient, so
+    /// the send persisted a transcript entry carrying the image and the
+    /// user loses nothing.
+    #[serde(default)]
+    pub attachment_dropped: bool,
 }
 
 /// How many superseded logical message ids a bubble remembers for receipt
 /// matching. Bounds vault growth on a peer that never acks; eight covers
 /// far more resends than a live peer needs.
 pub const PRIOR_MESSAGE_ID_CAP: usize = 8;
+
+/// How many attachment-bearing bubbles the outbox will retain at once.
+///
+/// The retention policy, in full. The outbox has no garbage collector: a
+/// bubble lives until its peer's device is revoked, so anything stored on
+/// one is stored forever. Attachments are up to
+/// [`crate::attachment::MAX_ATTACHMENT_BYTES`] (256 `KiB`) raw each, so
+/// retaining them unconditionally would turn a phone's chat vault into an
+/// image store. Three rules keep it bounded, and none of them loses
+/// content the user is not told about:
+///
+/// 1. **Bytes are released the moment they can no longer do work.** A
+///    bubble that reaches [`SendState::Delivered`] is terminal and never
+///    re-sent, and the send that earned the receipt persisted a transcript
+///    entry carrying the image -- so its copy is dead weight and goes,
+///    silently and safely. A bubble that reaches [`SendState::Failed`] is
+///    also terminal (nothing ever retries it), but it never sent and so
+///    never persisted a transcript entry -- its bytes go too, with
+///    [`OutboxBubble::attachment_dropped`] set so the shell can say so.
+/// 2. **What remains is capped.** Only [`SendState::Queued`] and
+///    [`SendState::Sent`] bubbles hold bytes, at most this many. Because
+///    each attachment is independently capped, the retained set is bounded
+///    at `ATTACHMENT_BUBBLE_CAP * MAX_ATTACHMENT_BYTES` -- 4 `MiB` raw,
+///    about 5.5 `MiB` as the base64 the vault seals.
+/// 3. **The cap refuses, it never degrades.** Enqueueing an image past the
+///    cap returns [`crate::ChatError::OutboxAttachmentsFull`] rather than
+///    quietly sending the message without its picture. Rule 1 guarantees
+///    the cap cannot wedge: every bubble that stops being sendable gives
+///    its slot back.
+///
+/// Sixteen is far past any realistic backlog -- it takes sixteen photos
+/// that have not yet been confirmed delivered to reach it -- while staying
+/// a few megabytes rather than a few hundred.
+pub const ATTACHMENT_BUBBLE_CAP: usize = 16;
 
 impl OutboxBubble {
     /// A fresh [`SendState::Queued`] bubble for `peer`, enqueued at
@@ -131,6 +199,9 @@ impl OutboxBubble {
             prior_message_ids: Vec::new(),
             last_error: None,
             group: None,
+            attachment: None,
+            reply_to_message_id: None,
+            attachment_dropped: false,
         }
     }
 
@@ -140,6 +211,39 @@ impl OutboxBubble {
     pub fn with_group(mut self, group: GroupOutbound) -> Self {
         self.group = Some(group);
         self
+    }
+
+    /// Attach the DM payload a retry must reproduce: the inline image and
+    /// the reply anchor. Builder form of [`Self::attachment`] +
+    /// [`Self::reply_to_message_id`], taken together because the one send
+    /// path that supplies either supplies both.
+    #[must_use]
+    pub fn with_dm_payload(
+        mut self,
+        attachment: Option<crate::attachment::Attachment>,
+        reply_to_message_id: Option<String>,
+    ) -> Self {
+        self.attachment = attachment;
+        self.reply_to_message_id = reply_to_message_id;
+        self
+    }
+
+    /// Release the retained attachment bytes, flagging the loss when this
+    /// bubble may have been their last holder.
+    ///
+    /// Called only on a transition into a terminal state (see
+    /// [`ATTACHMENT_BUBBLE_CAP`] rule 1). `last_holder` distinguishes the
+    /// two terminal arms: a [`SendState::Failed`] bubble never sent, so
+    /// nothing persisted its image and the shell must be told; a
+    /// [`SendState::Delivered`] one did, so its transcript entry holds the
+    /// image and there is nothing to announce.
+    ///
+    /// Idempotent, and a no-op on a bubble that never carried an image --
+    /// so a text message can never be flagged as having lost a picture.
+    pub(crate) fn release_attachment(&mut self, last_holder: bool) {
+        if self.attachment.take().is_some() && last_holder {
+            self.attachment_dropped = true;
+        }
     }
 
     /// Does a delivery receipt for `message_id` belong to this bubble?
@@ -262,6 +366,79 @@ mod tests {
         // Terminal states never retry.
         assert!(!is_retryable(&bubble(SendState::Delivered, Some("m"))));
         assert!(!is_retryable(&bubble(SendState::Failed, None)));
+    }
+
+    fn image() -> crate::attachment::Attachment {
+        crate::attachment::Attachment::from_raw("image/png", 32, 24, &[0xABu8; 1024]).unwrap()
+    }
+
+    #[test]
+    fn a_bubble_round_trips_its_whole_dm_payload() {
+        // The regression this guards: the durable record used to hold the
+        // body alone, so everything else about the message evaporated the
+        // moment the first attempt ended.
+        let b =
+            bubble(SendState::Queued, None).with_dm_payload(Some(image()), Some("m-parent".into()));
+        let j = serde_json::to_vec(&b).unwrap();
+        let back: OutboxBubble = serde_json::from_slice(&j).unwrap();
+        assert_eq!(back, b);
+        assert_eq!(back.attachment.as_ref().unwrap().mime, "image/png");
+        assert_eq!(
+            back.attachment.unwrap().validate().unwrap(),
+            vec![0xABu8; 1024],
+            "the image bytes survive the vault round trip intact"
+        );
+        assert_eq!(back.reply_to_message_id.as_deref(), Some("m-parent"));
+    }
+
+    #[test]
+    fn a_bubble_written_before_full_fidelity_retry_still_loads() {
+        // Back-compat: a vault sealed by the shipping build has none of
+        // the payload fields. It must load as a plain text bubble and stay
+        // sendable -- a parse failure would drop every pending message.
+        let legacy = serde_json::json!({
+            "id": "b1",
+            "peer": "aa".repeat(32),
+            "body": "hi",
+            "status": "Queued",
+            "message_id": null,
+            "enqueued_at_ms": 1_000,
+            "state_changed_at_ms": 1_000,
+            "prior_message_ids": [],
+            "last_error": null,
+        });
+        let b: OutboxBubble = serde_json::from_value(legacy).unwrap();
+        assert_eq!(b.body, "hi");
+        assert!(b.attachment.is_none());
+        assert!(b.reply_to_message_id.is_none());
+        assert!(!b.attachment_dropped);
+        assert!(is_retryable(&b), "a legacy bubble still sends");
+    }
+
+    #[test]
+    fn release_attachment_flags_only_when_it_was_the_last_copy() {
+        // Delivered: the send persisted a transcript entry holding the
+        // image, so releasing the bytes loses nothing and says nothing.
+        let mut delivered =
+            bubble(SendState::Delivered, Some("m")).with_dm_payload(Some(image()), None);
+        delivered.release_attachment(false);
+        assert!(delivered.attachment.is_none());
+        assert!(!delivered.attachment_dropped);
+
+        // Failed: never sent, so nothing else holds the image and the
+        // shell has to be able to say so.
+        let mut failed = bubble(SendState::Failed, None).with_dm_payload(Some(image()), None);
+        failed.release_attachment(true);
+        assert!(failed.attachment.is_none());
+        assert!(failed.attachment_dropped);
+
+        // Idempotent, and a text message is never flagged as having lost
+        // a picture it never had.
+        let mut text = bubble(SendState::Failed, None);
+        text.release_attachment(true);
+        assert!(!text.attachment_dropped);
+        failed.release_attachment(true);
+        assert!(failed.attachment_dropped);
     }
 
     #[test]

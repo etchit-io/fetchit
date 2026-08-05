@@ -31,12 +31,20 @@ class ConversationStore {
 
     /**
      * Per-peer FIFO of images staged for outbound DMs that are in flight.
-     * The engine's [OutboxBubble] carries the body only, so the shell
-     * bridges the picture across the send itself: [stageOutboundAttachment]
-     * pushes one entry per send and [upsertOutbox] pops one the first time
-     * it sees each new bubble, which lines the entries up with the engine's
-     * optimistic-echo order. Same bridge desktop's `stageOutboundMeta`
-     * builds, for the same reason.
+     *
+     * A pure optimistic-render accelerator, and nothing more. The engine's
+     * outbox bubble now carries the image itself, durably, from its very
+     * first echo — that is the source of truth, and it is what makes a
+     * sent photo survive a restart. This queue only covers the gap before
+     * a bubble exists, and stands in for a bubble that has no image of its
+     * own (one written by an older build, or one whose bytes the engine
+     * released at a terminal state).
+     *
+     * [stageOutboundAttachment] pushes one entry per attachment-bearing
+     * send and [upsertOutbox] pops one the first time it sees each new
+     * bubble — popping even when the bubble brought its own image, so the
+     * queue stays in lockstep with the engine's echo order instead of
+     * leaking an entry that would then attach itself to a later message.
      */
     private val stagedOutbound = mutableMapOf<String, ArrayDeque<Staged>>()
     private var nextStageToken = 0L
@@ -115,9 +123,17 @@ class ConversationStore {
      * `Sending` echo, the `Delivered` transition, and a `Failed` terminal all
      * land on the same bubble instead of stacking duplicates.
      *
-     * A bubble seen for the first time claims the head of this peer's staged
-     * image queue, if any; later states of the same bubble keep the image
-     * already on the message.
+     * [attachment] is the image off the DURABLE bubble and is preferred
+     * over everything else — it is the only source that survives a process
+     * death, so a photo the user sent still draws after a restart. When
+     * the bubble brought none, the image already on the message wins (a
+     * later state of a bubble whose picture is being shown), and only then
+     * does the staged queue stand in. A bubble seen for the first time
+     * consumes this peer's head staged entry either way, so the queue
+     * cannot drift out of step with the engine's echo order.
+     *
+     * [attachmentDropped] marks a bubble whose image the engine could not
+     * keep; it is sticky once seen, since the loss does not un-happen.
      */
     fun upsertOutbox(
         peerAgentIdHex: String,
@@ -128,6 +144,8 @@ class ConversationStore {
         delivered: Boolean,
         failed: Boolean,
         lastError: String?,
+        attachment: ChatAttachment? = null,
+        attachmentDropped: Boolean = false,
     ) {
         synchronized(lock) {
             val flow = flowFor(peerAgentIdHex)
@@ -138,13 +156,19 @@ class ConversationStore {
             // downgrade today, but a reordered or duplicated event must not flip a
             // delivered bubble back to Sending or Failed.
             if (idx >= 0 && list[idx].delivered && !delivered) return
-            val attachment = if (idx >= 0) {
-                list[idx].attachment
+            // Consume the staged entry on first sight regardless of whether
+            // it is needed: leaving it queued would hand this message's
+            // picture to the next one sent to this peer.
+            val staged = if (idx >= 0) {
+                null
             } else {
                 stagedOutbound[peerAgentIdHex]?.let { q ->
                     q.removeFirstOrNull()?.also { if (q.isEmpty()) stagedOutbound.remove(peerAgentIdHex) }
                 }?.attachment
             }
+            val resolved = attachment
+                ?: list.getOrNull(idx)?.attachment
+                ?: staged
             val msg = ChatMessage(
                 outbound = true,
                 body = body,
@@ -154,7 +178,9 @@ class ConversationStore {
                 failed = failed,
                 outboxId = outboxId,
                 lastError = lastError,
-                attachment = attachment,
+                attachment = resolved,
+                attachmentDropped = attachmentDropped ||
+                    (idx >= 0 && list[idx].attachmentDropped),
             )
             flow.value = if (idx >= 0) {
                 list.toMutableList().also { it[idx] = msg }
@@ -175,6 +201,17 @@ class ConversationStore {
      * engine's `messageId`). Entries with a blank/null id (legacy pre-id
      * persisted messages) are always kept, since they cannot be matched.
      *
+     * A duplicate is not always redundant. The persisted transcript keeps
+     * the image for every message that was actually sent, while an outbox
+     * bubble may have none (one written by an older build, or one whose
+     * bytes the engine released once the message was delivered). Dropping
+     * the hydrated copy wholesale is what used to erase a sent photo from
+     * the sender's own thread on restart: the attachment-less bubble
+     * projects first on connect, then the transcript entry carrying the
+     * picture was discarded as "already shown". So a duplicate whose
+     * hydrated copy has an image the shown one lacks PATCHES it in — the
+     * vault is the durable truth about what was sent.
+     *
      * Surviving entries are appended and the whole thread is re-sorted by
      * [ChatMessage.sentAtMs] so persisted history interleaves correctly with
      * any live messages already shown. A stable sort preserves the relative
@@ -186,17 +223,34 @@ class ConversationStore {
         if (msgs.isEmpty()) return
         synchronized(lock) {
             val flow = flowFor(key)
-            val existing = flow.value
+            var existing = flow.value
             val seenIds = existing.mapNotNull { it.messageId?.takeIf(String::isNotBlank) }.toHashSet()
             val additions = ArrayList<ChatMessage>(msgs.size)
+            val restored = HashMap<String, ChatAttachment>()
             for (m in msgs) {
                 val id = m.messageId?.takeIf(String::isNotBlank)
-                // Drop a hydrated message whose id is already shown (live event
-                // or outbox bubble). Keep id-less legacy entries — unmatchable.
-                if (id != null && !seenIds.add(id)) continue
+                // A hydrated message whose id is already shown (live event or
+                // outbox bubble) is a duplicate — but keep its image if the
+                // shown copy has none. Keep id-less legacy entries entirely,
+                // since they are unmatchable.
+                if (id != null && !seenIds.add(id)) {
+                    m.attachment?.let { restored[id] = it }
+                    continue
+                }
                 additions.add(m)
             }
-            if (additions.isEmpty()) return
+            if (restored.isNotEmpty()) {
+                existing = existing.map { shown ->
+                    val fromVault = shown.messageId
+                        ?.takeIf { shown.attachment == null }
+                        ?.let(restored::get)
+                    if (fromVault == null) shown else shown.copy(attachment = fromVault)
+                }
+            }
+            if (additions.isEmpty()) {
+                if (restored.isNotEmpty()) flow.value = existing
+                return
+            }
             flow.value = (existing + additions).sortedBy { it.sentAtMs }
         }
     }

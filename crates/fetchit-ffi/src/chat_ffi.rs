@@ -151,6 +151,27 @@ pub struct OutboxBubbleFfi {
     /// bubble reaching `Delivered` back to the one UI message and flip its
     /// pending tick to sent. `None` for a DM bubble.
     pub group_client_message_id: Option<String>,
+    /// The inline image this DM carries, straight off the DURABLE bubble.
+    ///
+    /// This is what lets a sent photo still render in the sender's own
+    /// thread after a restart: the bubble reloads from the vault with its
+    /// image, so the shell never has to rely on an in-memory staging slot
+    /// that dies with the process. `None` on a text message, on a group
+    /// fan-out copy, on a bubble written before full-fidelity retry, and
+    /// on one whose bytes were released at a terminal state -- for that
+    /// last case see [`Self::attachment_dropped`], and prefer the
+    /// persisted transcript ([`ChatHistoryMessageFfi::attachment`]), which
+    /// keeps the image for every message that was actually sent.
+    pub attachment: Option<crate::attachment_ffi::ChatAttachmentFfi>,
+    /// `true` when this bubble carried an image the outbox has released
+    /// and no transcript entry holds -- the message failed terminally, so
+    /// it was never sent and never persisted.
+    ///
+    /// Render it as an explicit "image not kept" note. The alternative is
+    /// a bubble with nothing in it, which silently misreports what the
+    /// user sent. Never set for a delivered message, whose image lives on
+    /// in the transcript.
+    pub attachment_dropped: bool,
 }
 
 impl From<fetchit_chat::outbox::OutboxBubble> for OutboxBubbleFfi {
@@ -165,6 +186,8 @@ impl From<fetchit_chat::outbox::OutboxBubble> for OutboxBubbleFfi {
             state_changed_at_ms: bubble.state_changed_at_ms,
             last_error: bubble.last_error,
             group_client_message_id: bubble.group.map(|g| g.client_message_id),
+            attachment: crate::attachment_ffi::attachment_to_ffi(bubble.attachment.as_ref()),
+            attachment_dropped: bubble.attachment_dropped,
         }
     }
 }
@@ -3094,19 +3117,28 @@ impl ChatClient {
     /// payload as the body. A message may be an image with no text, but
     /// not empty on both counts.
     ///
-    /// The image does NOT ride the durable bubble: `OutboxBubble` stores
-    /// the body only, so an engine-driven RESEND of this message goes out
-    /// as text (the same fidelity desktop's outbox driver has). The first
-    /// send carries it; a shell that wants the optimistic echo to show the
-    /// image holds its own copy until the bubble arrives.
+    /// The image RIDES the durable bubble, so it comes back on every
+    /// [`ChatClient::outbox_snapshot`] and every `Outbox` event
+    /// ([`OutboxBubbleFfi::attachment`]) -- including after a restart --
+    /// and an engine-driven resend re-delivers the picture rather than a
+    /// text-only reduction of the message. A shell should render the
+    /// bubble's own attachment and treat any local copy it holds purely
+    /// as an optimistic accelerator.
     ///
-    /// Reply-to is still not carried over the FFI outbox.
+    /// Retained images are capped
+    /// (`fetchit_chat::outbox::ATTACHMENT_BUBBLE_CAP`); past the cap the
+    /// send is refused rather than accepted without its picture.
+    ///
+    /// Reply-to is not settable over the FFI (no shell surfaces replies
+    /// yet); the engine carries it on the bubble when a caller supplies
+    /// one, so a resend stays threaded.
     ///
     /// # Errors
     ///
     /// [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex,
-    /// the client has no chat state, `body` is empty with no attachment, or
-    /// the attachment fails the MIME / dimension / size checks.
+    /// the client has no chat state, `body` is empty with no attachment,
+    /// the attachment fails the MIME / dimension / size checks, or the
+    /// outbox is already holding its cap of undelivered images.
     /// [`ChatFfiError::Network`] on transport or relay failure.
     pub async fn enqueue_dm(
         &self,
@@ -4123,6 +4155,53 @@ mod tests {
         assert_eq!(ffi.last_error.as_deref(), Some("boom"));
         // A DM bubble carries no group correlation id.
         assert_eq!(ffi.group_client_message_id, None);
+        // Text message, nothing lost: neither attachment field is set.
+        assert_eq!(ffi.attachment, None);
+        assert!(!ffi.attachment_dropped);
+    }
+
+    #[test]
+    fn outbox_bubble_ffi_surfaces_the_durable_image_as_raw_bytes() {
+        // What makes a sent photo survive a restart in the sender's own
+        // thread: the image comes off the DURABLE bubble, so the shell
+        // never depends on an in-memory staging slot that dies with the
+        // process.
+        use fetchit_chat::attachment::Attachment;
+        use fetchit_chat::identity::AgentId;
+        use fetchit_chat::outbox::OutboxBubble;
+        let raw = vec![0x3Cu8; 3072];
+        let bubble = OutboxBubble::queued(
+            "bid-2".into(),
+            AgentId("ab".repeat(32)),
+            String::new(),
+            1_700_000_000_000,
+        )
+        .with_dm_payload(
+            Some(Attachment::from_raw("image/webp", 64, 64, &raw).expect("valid image")),
+            Some("m-parent".into()),
+        );
+        let ffi = OutboxBubbleFfi::from(bubble);
+        let att = ffi.attachment.expect("the bubble's image crosses the FFI");
+        assert_eq!(att.mime, "image/webp");
+        assert_eq!(att.width, 64);
+        assert_eq!(att.height, 64);
+        assert_eq!(att.bytes, raw, "the shell gets raw bytes, never base64");
+        assert!(!ffi.attachment_dropped);
+    }
+
+    #[test]
+    fn outbox_bubble_ffi_reports_a_released_image_so_the_shell_can_say_so() {
+        // A terminally failed photo: the bytes are gone (nothing retries
+        // it, nothing persisted it) and the flag is the shell's only way
+        // to avoid drawing an empty bubble that lies about what was sent.
+        use fetchit_chat::identity::AgentId;
+        use fetchit_chat::outbox::OutboxBubble;
+        let mut bubble =
+            OutboxBubble::queued("bid-3".into(), AgentId("ab".repeat(32)), String::new(), 1);
+        bubble.attachment_dropped = true;
+        let ffi = OutboxBubbleFfi::from(bubble);
+        assert_eq!(ffi.attachment, None);
+        assert!(ffi.attachment_dropped);
     }
 
     #[test]
