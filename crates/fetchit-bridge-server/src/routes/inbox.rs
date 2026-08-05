@@ -40,6 +40,7 @@ use serde_json::{json, Value};
 use fetchit_fedi::actor::Actor;
 
 use crate::auth::{parse_headers, verify_request, AuthError};
+use crate::routes::signature_meta::SignatureDiagnostics;
 use crate::server::BridgeState;
 use crate::store::{ActorRecord, InboxMessage};
 
@@ -111,7 +112,31 @@ pub async fn post_inbox(
     {
         // A rejected delivery is invisible to both ends without this line —
         // the 2026-07-13 lost-Accept class was undiagnosable from logs.
-        tracing::warn!(handle, sender = %sender_actor_url, reason, "inbox: signature rejected");
+        // `reason` alone still buckets four distinct failures under
+        // "signature invalid", so the signature's own metadata rides
+        // along: wire format, declared component list and whether each
+        // component actually arrived, the signer's keyId and whether it
+        // is owned by the activity's actor, and the exact host
+        // candidates / path the base was rebuilt from. Header NAMES and
+        // identifiers only — never a header value, the body, or the
+        // signature bytes (see `signature_meta`'s privacy contract).
+        let diag =
+            SignatureDiagnostics::collect(&headers, &handle, &state.config.domain, sender_url);
+        tracing::warn!(
+            handle,
+            sender = %sender_actor_url,
+            reason,
+            sig_format = diag.format,
+            sig_label = diag.label.as_str(),
+            key_id = diag.key_id.as_str(),
+            key_id_owner_matches_actor = diag.key_id_owner_matches_actor,
+            algorithm = diag.algorithm.as_str(),
+            signed_headers = diag.signed_headers.as_str(),
+            signed_header_presence = diag.signed_header_presence.as_str(),
+            host_candidates = diag.host_candidates.as_str(),
+            request_path = diag.request_path.as_str(),
+            "inbox: signature rejected"
+        );
         return (StatusCode::UNAUTHORIZED, reason).into_response();
     }
 
