@@ -85,6 +85,15 @@ pub struct AvatarMeta {
     /// blank an avatar that already renders.
     #[serde(default)]
     pub failed: bool,
+    /// This entry is the user's OWN picture, written locally when they
+    /// set it — not a cached copy of someone else's.
+    ///
+    /// Exempt from eviction: everything else here can be re-fetched from
+    /// a public URL, but the private (LIT) surfaces may never issue that
+    /// fetch, so an evicted self-slot would blank the user's own badge
+    /// with no cache-only way back.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 /// Read the sidecar for `label`. A missing or unparsable sidecar reads
@@ -151,8 +160,12 @@ pub fn note_icon_url(layout: &StoreLayout, label: &str, icon_url: &str) -> Resul
         // next lazy read rather than waiting out the refresh window.
         fetched_at_ms: 0,
         etag: None,
-        content_type: existing.map(|m| m.content_type).unwrap_or_default(),
+        content_type: existing
+            .as_ref()
+            .map(|m| m.content_type.clone())
+            .unwrap_or_default(),
         failed: false,
+        pinned: existing.is_some_and(|m| m.pinned),
     };
     write_json_atomic(&layout.fedi_avatar_meta_path(label), &meta)?;
     Ok(true)
@@ -176,8 +189,68 @@ pub fn store_success(
         etag: fetched.etag.clone(),
         content_type: fetched.content_type.clone(),
         failed: false,
+        // A refresh of the self slot (the fediverse surfaces treat our
+        // own label like any other) must not un-pin it.
+        pinned: load_meta(layout, label).is_some_and(|m| m.pinned),
     };
     write_json_atomic(&layout.fedi_avatar_meta_path(label), &meta)
+}
+
+/// Persist the user's OWN picture into the self slot: the same layout as
+/// a cached correspondent, marked [`AvatarMeta::pinned`] so eviction
+/// never takes it.
+///
+/// Written from the bytes the device just uploaded, so the badge shows
+/// the new picture immediately and — more importantly — without any
+/// surface ever fetching it back over HTTP.
+///
+/// # Errors
+/// [`ChatError`] when either file cannot be written.
+pub fn store_own(
+    layout: &StoreLayout,
+    label: &str,
+    source_url: &str,
+    bytes: &[u8],
+    content_type: &str,
+    now_ms: i64,
+) -> Result<(), ChatError> {
+    write_bytes_atomic(&layout.fedi_avatar_path(label), bytes)?;
+    let meta = AvatarMeta {
+        source_url: source_url.to_owned(),
+        fetched_at_ms: now_ms,
+        etag: None,
+        content_type: content_type.to_owned(),
+        failed: false,
+        pinned: true,
+    };
+    write_json_atomic(&layout.fedi_avatar_meta_path(label), &meta)
+}
+
+/// Drop a cache entry outright — both the image and its sidecar.
+/// Returns whether anything was there. Used when the user removes their
+/// own picture: a cleared avatar must not keep rendering locally.
+///
+/// # Errors
+/// [`ChatError`] when a delete fails for a reason other than the file
+/// already being gone.
+pub fn forget(layout: &StoreLayout, label: &str) -> Result<bool, ChatError> {
+    let mut removed = false;
+    for path in [
+        layout.fedi_avatar_path(label),
+        layout.fedi_avatar_meta_path(label),
+    ] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed = true,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(ChatError::Invalid(format!(
+                    "avatar cache forget {}: {err}",
+                    path.display()
+                )))
+            }
+        }
+    }
+    Ok(removed)
 }
 
 /// Record a failed attempt so the backoff window starts. Any previously
@@ -196,6 +269,7 @@ pub fn store_failure(
         source_url: source_url.to_owned(),
         fetched_at_ms: now_ms,
         etag: previous.as_ref().and_then(|m| m.etag.clone()),
+        pinned: previous.as_ref().is_some_and(|m| m.pinned),
         content_type: previous.map(|m| m.content_type).unwrap_or_default(),
         failed: true,
     };
@@ -207,6 +281,7 @@ struct Entry {
     key: String,
     fetched_at_ms: i64,
     bytes: u64,
+    pinned: bool,
 }
 
 fn scan_entries(layout: &StoreLayout) -> Vec<Entry> {
@@ -223,16 +298,16 @@ fn scan_entries(layout: &StoreLayout) -> Vec<Entry> {
         let Some(key) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        let fetched_at_ms = std::fs::read(&path)
+        let meta = std::fs::read(&path)
             .ok()
-            .and_then(|b| serde_json::from_slice::<AvatarMeta>(&b).ok())
-            .map_or(0, |m| m.fetched_at_ms);
+            .and_then(|b| serde_json::from_slice::<AvatarMeta>(&b).ok());
         let img: PathBuf = dir.join(format!("{key}.img"));
         let bytes = std::fs::metadata(&img).map_or(0, |m| m.len());
         out.push(Entry {
             key: key.to_owned(),
-            fetched_at_ms,
+            fetched_at_ms: meta.as_ref().map_or(0, |m| m.fetched_at_ms),
             bytes,
+            pinned: meta.is_some_and(|m| m.pinned),
         });
     }
     out
@@ -259,6 +334,11 @@ pub fn enforce_cache_bounds(layout: &StoreLayout) -> Result<usize, ChatError> {
     for e in &entries {
         if count <= AVATAR_CACHE_MAX_ENTRIES && total <= AVATAR_CACHE_MAX_BYTES {
             break;
+        }
+        // The user's own picture is not a cache entry to reclaim: the
+        // private surfaces that draw it may never fetch it back.
+        if e.pinned {
+            continue;
         }
         for path in [
             dir.join(format!("{}.img", e.key)),
@@ -692,6 +772,138 @@ mod tests {
             .filter(|i| load_meta(&layout, &format!("pending{i}@host")).is_some())
             .count();
         assert_eq!(i64::try_from(surviving_sidecars).unwrap(), n - 1);
+    }
+
+    // ----- the pinned self slot -----
+
+    #[test]
+    fn the_own_picture_is_stored_pinned_and_readable_like_any_other() {
+        let (layout, _t) = layout();
+        store_own(
+            &layout,
+            "josh@etchit.io",
+            "https://etchit.io/actors/josh/avatar",
+            &[0xFF, 0xD8, 0xFF, 0x01],
+            "image/jpeg",
+            5_000,
+        )
+        .unwrap();
+        assert_eq!(
+            cached_bytes(&layout, "josh@etchit.io").unwrap(),
+            vec![0xFF, 0xD8, 0xFF, 0x01]
+        );
+        let meta = load_meta(&layout, "josh@etchit.io").unwrap();
+        assert!(meta.pinned);
+        assert_eq!(meta.content_type, "image/jpeg");
+        assert!(!meta.failed);
+    }
+
+    #[test]
+    fn the_own_picture_survives_eviction_pressure() {
+        // Everything else here can be re-fetched from a public URL; the
+        // private surfaces that draw the self slot may never issue that
+        // fetch, so eviction must not be able to blank it.
+        let (layout, _t) = layout();
+        store_own(
+            &layout,
+            "josh@etchit.io",
+            "https://etchit.io/actors/josh/avatar",
+            &[7u8; 64],
+            "image/jpeg",
+            // Oldest of everything, so a naive oldest-first pass would
+            // take it first.
+            1,
+        )
+        .unwrap();
+        let n = max_entries();
+        for i in 1..=(n + 10) {
+            store_success(
+                &layout,
+                &format!("user{i}@host"),
+                "https://cdn.example/a.png",
+                &png(16),
+                100 + i,
+            )
+            .unwrap();
+        }
+        // n + 10 correspondents plus the self slot; the bound is n, so 11
+        // have to go — and every one of them from the unpinned pool.
+        assert_eq!(enforce_cache_bounds(&layout).unwrap(), 11);
+        assert_eq!(
+            cached_bytes(&layout, "josh@etchit.io").unwrap().len(),
+            64,
+            "the user's own picture is not a cache entry to reclaim"
+        );
+        assert!(load_meta(&layout, "josh@etchit.io").unwrap().pinned);
+    }
+
+    #[test]
+    fn a_refresh_or_failure_on_the_self_slot_keeps_it_pinned() {
+        // The fediverse surfaces treat our own label like any other, so
+        // an ordinary refresh path must not quietly un-pin it.
+        let (layout, _t) = layout();
+        store_own(
+            &layout,
+            "josh@etchit.io",
+            "https://etchit.io/actors/josh/avatar",
+            &[1, 2, 3],
+            "image/png",
+            1,
+        )
+        .unwrap();
+        store_success(
+            &layout,
+            "josh@etchit.io",
+            "https://etchit.io/actors/josh/avatar",
+            &png(8),
+            2,
+        )
+        .unwrap();
+        assert!(load_meta(&layout, "josh@etchit.io").unwrap().pinned);
+        store_failure(
+            &layout,
+            "josh@etchit.io",
+            "https://etchit.io/actors/josh/avatar",
+            3,
+        )
+        .unwrap();
+        assert!(load_meta(&layout, "josh@etchit.io").unwrap().pinned);
+        note_icon_url(&layout, "josh@etchit.io", "https://etchit.io/other").unwrap();
+        assert!(load_meta(&layout, "josh@etchit.io").unwrap().pinned);
+    }
+
+    #[test]
+    fn forget_removes_both_files_and_is_idempotent() {
+        let (layout, _t) = layout();
+        store_own(
+            &layout,
+            "josh@etchit.io",
+            "https://etchit.io/actors/josh/avatar",
+            &[1, 2, 3],
+            "image/png",
+            1,
+        )
+        .unwrap();
+        assert!(forget(&layout, "josh@etchit.io").unwrap());
+        assert!(cached_bytes(&layout, "josh@etchit.io").is_none());
+        assert!(load_meta(&layout, "josh@etchit.io").is_none());
+        assert!(!forget(&layout, "josh@etchit.io").unwrap());
+    }
+
+    #[test]
+    fn a_sidecar_written_before_pinning_existed_reads_as_unpinned() {
+        // The field is additive: an entry cached by an older build has
+        // no `pinned` key and must decode as an ordinary cache entry.
+        let (layout, _t) = layout();
+        let path = layout.fedi_avatar_meta_path("a@h");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            br#"{"source_url":"https://cdn.example/a.png","fetched_at_ms":1,
+                 "etag":null,"content_type":"image/png","failed":false}"#,
+        )
+        .unwrap();
+        assert!(!load_meta(&layout, "a@h").unwrap().pinned);
     }
 
     #[test]

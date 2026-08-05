@@ -35,6 +35,7 @@ pub mod fedi_identity;
 pub mod fedi_link;
 pub mod fedi_mint_state;
 pub mod fedi_resolutions;
+pub mod fedi_self_avatar;
 pub mod fedi_thread;
 pub mod fedi_vault;
 pub mod group_invite_uri;

@@ -39,6 +39,12 @@ const HOP_BY_HOP = new Set([
  * longer accepted on `/actors` (it moved to `/v1/actors`), so the read
  * surface is GET-only.
  *
+ * Two `/actors/<h>/...` paths carry their own methods: `/inbox` accepts
+ * inbound POST deliveries from remote servers, and `/avatar` is the
+ * profile picture -- public GET (it is the `icon` URL every fediverse
+ * server fetches) plus owner-authenticated POST/DELETE, which the bridge
+ * itself gates with `bridge-auth-v1`.
+ *
  * @param {string} pathname
  * @returns {string[] | null}
  */
@@ -49,6 +55,9 @@ function routeMethods(pathname) {
   // An actor's inbox accepts inbound POST deliveries from remote
   // fediverse servers; every other /actors/* path is GET-only.
   if (pathname.endsWith("/inbox")) return ["POST"];
+  if (pathname.startsWith("/actors/") && pathname.endsWith("/avatar")) {
+    return ["GET", "POST", "DELETE"];
+  }
   if (pathname === "/actors" || pathname.startsWith("/actors/")) return ["GET"];
   return null;
 }

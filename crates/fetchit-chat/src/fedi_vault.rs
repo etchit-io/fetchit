@@ -71,6 +71,15 @@ pub struct ActorIdentityVault {
     /// re-signs in place without touching the RSA material.
     #[serde(default)]
     pub ml_dsa_attestation_v2: Option<fetchit_fedi::attestation::ActorAttestationV2>,
+    /// The `icon` URL published on the actor document, set when the user
+    /// picks a profile picture. `None` means no picture. Nothing here is
+    /// secret — it rides the vault because it is part of the actor
+    /// identity the document is rendered from.
+    #[serde(default)]
+    pub icon_url: Option<String>,
+    /// `mediaType` published beside [`Self::icon_url`].
+    #[serde(default)]
+    pub icon_media_type: Option<String>,
 }
 
 /// Seal an [`ActorIdentityVault`] under the master-derived fedi key
@@ -295,6 +304,8 @@ mod tests {
             spki_der: vec![0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE],
             ml_dsa_attestation: MlDsaAttestation::new(vec![0xAA; 32], vec![0xBB; 64]),
             ml_dsa_attestation_v2: None,
+            icon_url: None,
+            icon_media_type: None,
         }
     }
 
@@ -392,6 +403,26 @@ mod tests {
         }"#;
         let v: ActorIdentityVault = serde_json::from_str(json).unwrap();
         assert!(v.ml_dsa_attestation_v2.is_none());
+        assert!(
+            v.icon_url.is_none() && v.icon_media_type.is_none(),
+            "a vault minted before profile pictures must still decode"
+        );
+    }
+
+    #[test]
+    fn vault_round_trips_the_published_icon() {
+        let dir = tempdir().unwrap();
+        let layout = StoreLayout::ensure(dir.path().to_path_buf()).unwrap();
+        let master = fixture_master(0x42);
+        let mut v = sample_vault();
+        v.icon_url = Some("https://etchit.io/actors/josh/avatar".into());
+        v.icon_media_type = Some("image/jpeg".into());
+
+        save_actor_identity(&v, &master, &layout).unwrap();
+        let recovered = load_actor_identity(&v.handle, &master, &layout)
+            .unwrap()
+            .expect("vault file should exist after save");
+        assert_eq!(recovered, v);
     }
 
     #[test]

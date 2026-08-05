@@ -31,6 +31,22 @@ describe("classify -- the routing + security decision", () => {
     expect(classify("/actors/josh", "PUT")).toBe("method-not-allowed");
   });
 
+  it("proxies the avatar's public read and its owner-authed writes", () => {
+    // GET is the `icon` URL every fediverse server fetches; POST/DELETE
+    // are the owner's own writes, which the bridge gates itself.
+    expect(classify("/actors/josh/avatar", "GET")).toBe("proxy");
+    expect(classify("/actors/josh/avatar", "POST")).toBe("proxy");
+    expect(classify("/actors/josh/avatar", "DELETE")).toBe("proxy");
+    expect(classify("/actors/josh/avatar", "PUT")).toBe("method-not-allowed");
+  });
+
+  it("does not widen methods for a lookalike avatar path", () => {
+    expect(classify("/actors/josh/avatarium", "POST")).toBe(
+      "method-not-allowed",
+    );
+    expect(classify("/avatar", "POST")).toBeNull();
+  });
+
   it("proxies POST on the /v1/actors registry collection", () => {
     expect(classify("/v1/actors", "POST")).toBe("proxy");
   });

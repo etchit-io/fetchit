@@ -625,6 +625,14 @@ pub struct GroupSendReceiptFfi {
 /// `DEFAULT_FEDI_DOMAIN`; the registry base is `https://{FEDI_DOMAIN}/`.
 const FEDI_DOMAIN: &str = "etchit.io";
 
+/// Wall clock in unix milliseconds. A pre-epoch clock reads as 0, which
+/// the engine's skew window rejects — better than a wrapped stamp.
+fn now_ms_u64() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
 /// How the fediverse directory answered a registration attempt. The three
 /// arms are materially different to the user: a conflict is terminal and
 /// needs a different name, a transient failure clears on its own.
@@ -1884,6 +1892,74 @@ impl ChatClient {
     /// read what those surfaces already fetched.
     pub fn fedi_avatar_cached(&self, label: String) -> Option<Vec<u8>> {
         self.inner.fedi_avatar_cached(&label)
+    }
+
+    /// Set the user's OWN profile picture.
+    ///
+    /// `bytes` must already be the final image: the shell decodes the
+    /// photo the user picked, crops and downscales it, and RE-ENCODES it
+    /// (which is what drops the EXIF — original camera metadata, GPS
+    /// included, must never leave the device). Nothing below this call
+    /// decodes or rewrites the image; the engine and the bridge both
+    /// treat it as opaque bytes.
+    ///
+    /// JPEG / PNG / WebP only, 512 KiB max. The engine hosts the bytes on
+    /// our own bridge, publishes the `icon` on the actor document so
+    /// Mastodon and friends show the picture, and pins a local copy so
+    /// every fetch>it surface — including the private ones, which may
+    /// never issue a request — can draw it.
+    ///
+    /// # Errors
+    /// [`ChatFfiError`] when no public handle is minted, the image fails
+    /// the format / size checks, or the bridge refuses the upload. The
+    /// previously published picture is untouched on failure.
+    pub async fn fedi_set_avatar(
+        &self,
+        bytes: Vec<u8>,
+        content_type: String,
+    ) -> Result<(), ChatFfiError> {
+        let handle = self.require_fedi_handle()?;
+        self.inner
+            .set_fedi_avatar(&handle, bytes, &content_type, now_ms_u64())
+            .await
+            .map(|_| ())
+            .map_err(ChatFfiError::from)
+    }
+
+    /// Remove the user's own profile picture: the hosted bytes are
+    /// deleted, the actor document stops publishing an `icon`, and the
+    /// local copy is dropped.
+    ///
+    /// # Errors
+    /// [`ChatFfiError`] when no public handle is minted or the bridge
+    /// refuses the removal.
+    pub async fn fedi_clear_avatar(&self) -> Result<(), ChatFfiError> {
+        let handle = self.require_fedi_handle()?;
+        self.inner
+            .clear_fedi_avatar(&handle, now_ms_u64())
+            .await
+            .map_err(ChatFfiError::from)
+    }
+
+    /// The user's own profile picture, or `None` when they have not set
+    /// one (or have no handle yet).
+    ///
+    /// Cache-only, like [`Self::fedi_avatar_cached`] and for the same
+    /// reason: the LIT chat header draws this, and that surface must
+    /// never produce an observable request. The bytes are local because
+    /// the set path put them there, so no fetch is ever needed.
+    #[must_use]
+    pub fn fedi_self_avatar(&self) -> Option<Vec<u8>> {
+        let handle = self.fedi_actor_status()?;
+        self.inner.fedi_self_avatar(&handle, FEDI_DOMAIN)
+    }
+
+    /// The minted public handle, or the error every avatar write needs
+    /// to report when there is none.
+    fn require_fedi_handle(&self) -> Result<String, ChatFfiError> {
+        self.fedi_actor_status().ok_or(ChatFfiError::Invalid {
+            reason: "no public handle minted".to_owned(),
+        })
     }
 
     /// Mark the fediverse DM thread with `label` read up to its newest
