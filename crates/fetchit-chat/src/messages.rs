@@ -1820,6 +1820,36 @@ impl<'a> Endpoint<'a> {
         })
     }
 
+    /// Re-send one durable outbound DM bubble: re-encrypt and route the
+    /// WHOLE message the bubble retained -- body, reply anchor, and inline
+    /// image alike.
+    ///
+    /// The DM sibling of [`Self::resend_group_bubble`], and the only way
+    /// the retry driver re-sends a DM. Taking the bubble rather than loose
+    /// arguments is the point: the retry path used to call [`Self::send`]
+    /// directly and pass `None, None` for the reply anchor and the
+    /// attachment, which silently downgraded a resent photo to a
+    /// text-only message (an empty one when the photo had no caption).
+    /// With one bubble-shaped entry point there is no argument list left
+    /// to get wrong.
+    ///
+    /// # Errors
+    /// Whatever [`Self::send`] returns.
+    pub(crate) async fn resend_dm_bubble(
+        &self,
+        bubble: &crate::outbox::OutboxBubble,
+        sender_name: &str,
+    ) -> Result<Option<String>> {
+        self.send(
+            &bubble.peer,
+            &bubble.body,
+            sender_name,
+            bubble.reply_to_message_id.as_deref(),
+            bubble.attachment.as_ref(),
+        )
+        .await
+    }
+
     /// Re-send one durable private-group fan-out copy: rebuild the Group
     /// wire envelope from the STORED sealed frame (never re-sealing -- see
     /// [`crate::outbox::GroupOutbound`]) and route it to `peer`. The outbox
@@ -3546,6 +3576,94 @@ mod tests {
             sibling_conv.history.is_empty(),
             "sibling device thread must carry zero persisted history"
         );
+    }
+
+    /// The silent-degradation regression: an outbox RETRY of a photo DM
+    /// used to go out as a text-only message, because the retry path
+    /// called `send(.., None, None)` and the durable bubble had nothing
+    /// else to give it. Nobody was told -- the recipient just received a
+    /// message with no picture (an empty one when the photo had no
+    /// caption). `resend_dm_bubble` re-sends the whole retained payload.
+    #[tokio::test]
+    async fn a_dm_resend_carries_the_bubbles_image_and_reply_anchor() {
+        let rig = build_rig();
+        let signer_arc = rig.signer_arc();
+        let dev01 = build_rig();
+        let to = AgentId(dev01.agent_hex().to_owned());
+
+        // A single imported contact, no user_id: the fanout falls back to
+        // this one agent, which is all this test needs.
+        StoredContactCard {
+            agent_id_hex: to.0.clone(),
+            display_name: "Peer".into(),
+            kem_public_key_b64: B64.encode(dev01.identity.kem_public_key()),
+            agent_public_key_b64: Some(B64.encode(dev01.signer.public_key())),
+            rendezvous_hints: None,
+            last_hint_epoch_ms: None,
+            user_id_hex: None,
+        }
+        .save(&rig.layout)
+        .unwrap();
+
+        let http = Http::new("http://127.0.0.1:1/".to_owned(), "t".to_owned()).unwrap();
+        let (transport, captured) = CapturingTransport::new();
+        let mut router = Router::new();
+        router.add(transport);
+        let endpoint = Endpoint::new_with_denylist(
+            &http,
+            &router,
+            Some(&rig.identity),
+            Some(&rig.registry),
+            Some(&signer_arc),
+            Some(&rig.layout),
+            [0u8; 32],
+            None,
+            None,
+            primary_cell(None),
+            neg_cache(),
+            group_kinds_cache(),
+        );
+
+        let attachment =
+            crate::attachment::Attachment::from_raw("image/png", 48, 36, &[0xC7u8; 4096]).unwrap();
+        let bubble = crate::outbox::OutboxBubble::queued(
+            "bid-1".into(),
+            to.clone(),
+            String::new(), // a caption-less photo: body is empty
+            1_700_000_000_000,
+        )
+        .with_dm_payload(Some(attachment.clone()), Some("m-parent".into()));
+
+        let msg_id = endpoint
+            .resend_dm_bubble(&bubble, "Alice")
+            .await
+            .unwrap()
+            .expect("resend must surface a message id");
+        assert!(
+            captured.lock().unwrap().is_some(),
+            "the resend actually reached the transport"
+        );
+
+        // The sender's own transcript is the durable proof the attachment
+        // rode this send: `send` threads ONE attachment argument into both
+        // the seal and the persisted entry.
+        let conv = rig
+            .registry
+            .find_dm_with(&to.0)
+            .await
+            .unwrap()
+            .expect("the resend bootstrapped the thread");
+        let entry = conv
+            .history
+            .iter()
+            .find(|e| e.message_id == msg_id)
+            .expect("outbound entry for the resent message");
+        let sent = entry
+            .attachment
+            .as_ref()
+            .expect("the resend carried the image, not a text-only reduction");
+        assert_eq!(sent, &attachment);
+        assert_eq!(sent.validate().unwrap(), vec![0xC7u8; 4096]);
     }
 
     /// Capturing transport: stores the most recent `TransitEnvelope` it

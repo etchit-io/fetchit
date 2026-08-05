@@ -4583,9 +4583,20 @@ class ChatModeView(
                 // recycled row must never show the previous message's
                 // picture.
                 bindAttachmentImage(msg)
+                // An image the engine could not keep (a send that failed
+                // terminally, so it was never delivered and never
+                // persisted). Say so: the alternative is a bubble with
+                // nothing in it but a timestamp, which silently misreports
+                // what the user sent.
+                val lostImage = msg.attachmentDropped && msg.attachment == null
+                if (lostImage) {
+                    val note = context.getString(R.string.chat_attachment_dropped)
+                    bubble.text = if (msg.body.isEmpty()) note else "${msg.body}\n$note"
+                }
                 // An image sent on its own carries no text: collapse the
                 // empty body so the bubble hugs the picture.
-                bubble.visibility = if (msg.body.isEmpty()) View.GONE else View.VISIBLE
+                bubble.visibility =
+                    if (msg.body.isEmpty() && !lostImage) View.GONE else View.VISIBLE
                 // A content card per address the body mentions, on both sides
                 // of the conversation — what you shared is a thing, not a hex
                 // string. Renders from the address alone; the preview fetch

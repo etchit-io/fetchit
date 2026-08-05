@@ -39,8 +39,20 @@ data class ChatMessage(
      * Inline image carried inside this message's sealed payload, or null
      * for a text-only message. DM-only: the group wire has no attachment
      * field, so a group message never has one.
+     *
+     * For an outbound message this comes from the DURABLE engine sources —
+     * the outbox bubble or the persisted transcript — so a sent photo
+     * still renders in the sender's own thread after a restart.
      */
     val attachment: ChatAttachment? = null,
+    /**
+     * True when this message had an image the engine could not keep: the
+     * send failed terminally, so it was never delivered and never
+     * persisted to the transcript. Drives an explicit "image not kept"
+     * note, because the alternative is an empty bubble that silently
+     * misreports what the user sent.
+     */
+    val attachmentDropped: Boolean = false,
 )
 
 /**

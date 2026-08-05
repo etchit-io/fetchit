@@ -1278,6 +1278,11 @@ class ChatController(private val appContext: Context, private val scope: Corouti
                 delivered = bubble.status == SendStateFfi.DELIVERED,
                 failed = bubble.status == SendStateFfi.FAILED,
                 lastError = bubble.lastError,
+                // The image rides the DURABLE bubble, so it comes back from
+                // the vault on a cold start -- the reason a sent photo still
+                // renders in the sender's own thread after a restart.
+                attachment = bubble.attachment?.toModel(),
+                attachmentDropped = bubble.attachmentDropped,
             )
         }
     }

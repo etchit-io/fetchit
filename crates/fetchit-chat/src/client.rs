@@ -2514,13 +2514,18 @@ impl Client {
     ///
     /// `sender_name` is shell-supplied (the engine holds no canonical
     /// display name); `reply_to_message_id` + `attachment` mirror
-    /// [`messages::Endpoint::send`].
+    /// [`messages::Endpoint::send`]. Both ride the durable bubble, so a
+    /// resend re-delivers the message the user actually composed rather
+    /// than a text-only reduction of it.
     ///
     /// # Errors
     ///
     /// [`ChatError::Invalid`] when the client has no chat state -- a
     /// misconfiguration, since `enqueue_dm` requires a `data_dir`/relay
-    /// client.
+    /// client. [`ChatError::OutboxAttachmentsFull`] when `attachment` is
+    /// set and the outbox already retains
+    /// [`crate::outbox::ATTACHMENT_BUBBLE_CAP`] images; the send is
+    /// refused rather than accepted-without-the-picture.
     pub async fn enqueue_dm(
         &self,
         peer: &crate::identity::AgentId,
@@ -2540,13 +2545,25 @@ impl Client {
             peer.clone(),
             body.to_owned(),
             now_ms,
+        )
+        .with_dm_payload(
+            attachment.cloned(),
+            reply_to_message_id.map(ToOwned::to_owned),
         );
         // Optimistic echo: persist + broadcast BEFORE the send so the UI
         // shows the bubble the instant the user hits enter (desktop parity).
         // The in-flight claim is taken in the same lock so a concurrent
-        // flush can never pick the bubble up mid-send.
+        // flush can never pick the bubble up mid-send -- and so is the
+        // attachment-cap check, so two concurrent photo sends cannot both
+        // pass a cap with one slot left.
         {
             let mut outbox = chat.outbox.lock().await;
+            if bubble.attachment.is_some() && !outbox.has_attachment_capacity() {
+                return Err(ChatError::OutboxAttachmentsFull {
+                    retained: outbox.attachment_bubble_count(),
+                    cap: crate::outbox::ATTACHMENT_BUBBLE_CAP,
+                });
+            }
             outbox.upsert(bubble.clone());
             outbox.try_mark_inflight(&bubble.id, now_ms);
         }
@@ -5023,11 +5040,12 @@ impl crate::outbox::driver::OutboxTransport for RealOutboxTransport {
         async move {
             // A group bubble re-sends its STORED sealed frame verbatim (a
             // re-seal would ratchet TreeKEM and duplicate at the receiver);
-            // a DM re-encrypts its body. RETRY fidelity for DMs: OutboxBubble
-            // stores body only, so a DM resend drops the original attachment
-            // + reply_to (faithful to desktop outboxDriver.ts; full-fidelity
-            // retry is a deferred Josh-gated improvement -- see the
-            // outbox-lift plan notes).
+            // a DM re-encrypts from the bubble's retained payload. That
+            // payload is the whole message -- body, inline image, reply
+            // anchor -- so a resend delivers what the user composed. It
+            // used to carry the body alone, which silently turned a
+            // resent photo into a text-only message (an EMPTY one when
+            // the photo had no caption) with no error anywhere.
             let message_id = match &bubble.group {
                 Some(group) => {
                     client
@@ -5038,7 +5056,7 @@ impl crate::outbox::driver::OutboxTransport for RealOutboxTransport {
                 None => {
                     client
                         .messages()
-                        .send(&bubble.peer, &bubble.body, &sender_name, None, None)
+                        .resend_dm_bubble(&bubble, &sender_name)
                         .await?
                 }
             };
@@ -8806,6 +8824,72 @@ mod tests {
                 .try_mark_inflight(&id, 0),
             "the initial send must not leak its claim"
         );
+    }
+
+    #[tokio::test]
+    async fn enqueue_dm_puts_the_whole_message_on_the_durable_bubble() {
+        // The send below cannot reach anyone (empty router), which is
+        // exactly the case that matters: the bubble sitting in the vault
+        // is now the ONLY copy of the user's picture, and it has to hold
+        // the whole message so the retry re-sends what was composed.
+        let (client, _dir) = test_client_no_denylist();
+        let peer = crate::identity::AgentId("bb".repeat(32));
+        let attachment =
+            crate::attachment::Attachment::from_raw("image/png", 12, 8, &[0x11u8; 512])
+                .expect("valid test image");
+
+        let id = client
+            .enqueue_dm(&peer, "", "alice", Some("m-parent"), Some(&attachment))
+            .await
+            .expect("enqueue returns a bubble id");
+
+        let snap = client.outbox_snapshot().await;
+        let bubble = snap.iter().find(|b| b.id == id).expect("bubble persisted");
+        assert_eq!(bubble.status, crate::outbox::SendState::Queued);
+        assert_eq!(bubble.reply_to_message_id.as_deref(), Some("m-parent"));
+        assert_eq!(
+            bubble.attachment.as_ref(),
+            Some(&attachment),
+            "an unsent photo has no other durable home"
+        );
+        assert!(!bubble.attachment_dropped);
+    }
+
+    #[tokio::test]
+    async fn enqueue_dm_refuses_an_image_past_the_retention_cap() {
+        // The cap refuses rather than degrades: accepting the send and
+        // dropping the picture from it is the silent content loss the
+        // whole policy exists to prevent.
+        let (client, _dir) = test_client_no_denylist();
+        let peer = crate::identity::AgentId("bb".repeat(32));
+        let attachment = crate::attachment::Attachment::from_raw("image/png", 4, 4, &[0x22u8; 256])
+            .expect("valid test image");
+
+        for i in 0..crate::outbox::ATTACHMENT_BUBBLE_CAP {
+            client
+                .enqueue_dm(&peer, "", "alice", None, Some(&attachment))
+                .await
+                .unwrap_or_else(|e| panic!("image {i} fits under the cap: {e}"));
+        }
+        let err = client
+            .enqueue_dm(&peer, "", "alice", None, Some(&attachment))
+            .await
+            .expect_err("the image past the cap is refused, not silently stripped");
+        assert!(
+            matches!(
+                err,
+                ChatError::OutboxAttachmentsFull { retained, cap }
+                    if retained == crate::outbox::ATTACHMENT_BUBBLE_CAP
+                        && cap == crate::outbox::ATTACHMENT_BUBBLE_CAP
+            ),
+            "expected a typed cap refusal, got: {err:?}"
+        );
+
+        // A TEXT message is never blocked by a full image backlog.
+        client
+            .enqueue_dm(&peer, "still fine", "alice", None, None)
+            .await
+            .expect("text sends are unaffected by the attachment cap");
     }
 
     #[tokio::test]

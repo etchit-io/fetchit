@@ -1,6 +1,7 @@
 package io.etchit.fetchit.chat
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -90,22 +91,33 @@ class ConversationStoreTest {
     }
 
     // ── staged outbound images ────────────────────────────────────────
-    // The engine bubble carries the body only, so the shell bridges the
-    // picture across the send. These are the rules that bridge obeys.
+    // The staged queue is a pure optimistic-render accelerator: it stands
+    // in only while no durable image is available. These are the rules it
+    // obeys when the bubble brings nothing of its own.
 
     private fun attachment(tag: Byte) =
         ChatAttachment("image/jpeg", 4, 3, ByteArray(2) { tag })
 
-    private fun upsert(s: ConversationStore, peer: String, id: String, delivered: Boolean = false) =
+    private fun upsert(
+        s: ConversationStore,
+        peer: String,
+        id: String,
+        delivered: Boolean = false,
+        messageId: String? = null,
+        attachment: ChatAttachment? = null,
+        attachmentDropped: Boolean = false,
+    ) =
         s.upsertOutbox(
             peerAgentIdHex = peer,
             outboxId = id,
             body = "",
             sentAtMs = 1L,
-            messageId = null,
+            messageId = messageId,
             delivered = delivered,
             failed = false,
             lastError = null,
+            attachment = attachment,
+            attachmentDropped = attachmentDropped,
         )
 
     @Test
@@ -196,5 +208,120 @@ class ConversationStoreTest {
         assertNull(s.messagesFor(bob).value.single().attachment)
         upsert(s, alice, "b2")
         assertEquals(att, s.messagesFor(alice).value.single().attachment)
+    }
+
+    // ── the durable image beats the in-memory one ─────────────────────
+    // The engine's outbox bubble now carries the picture itself, and the
+    // persisted transcript carries it for anything that was actually
+    // sent. Both survive a process death; the staged queue does not.
+
+    @Test
+    fun theBubblesOwnImageWinsOverTheStagedOne() {
+        val s = ConversationStore()
+        val peer = "a".repeat(64)
+        val durable = attachment(1)
+        val stale = attachment(2)
+        s.stageOutboundAttachment(peer, stale)
+        upsert(s, peer, "b1", attachment = durable)
+        assertEquals(durable, s.messagesFor(peer).value.single().attachment)
+        // The staged entry was still consumed: leaving it queued would
+        // hand this message's picture to the next send to this peer.
+        upsert(s, peer, "b2")
+        assertNull(s.messagesFor(peer).value[1].attachment)
+    }
+
+    @Test
+    fun aBubbleWithNoImageOfItsOwnStillFallsBackToTheStagedOne() {
+        // Back-compat: a bubble written by an older build carries no
+        // attachment, so the accelerator must still cover it.
+        val s = ConversationStore()
+        val peer = "a".repeat(64)
+        val att = attachment(1)
+        s.stageOutboundAttachment(peer, att)
+        upsert(s, peer, "b1", attachment = null)
+        assertEquals(att, s.messagesFor(peer).value.single().attachment)
+    }
+
+    @Test
+    fun aColdStartRendersTheSentPhotoFromTheDurableBubble() {
+        // The restart case, as the controller drives it: nothing is
+        // staged (that queue died with the process), the outbox snapshot
+        // projects first, then the transcript is merged in.
+        val s = ConversationStore()
+        val peer = "a".repeat(64)
+        val att = attachment(1)
+        upsert(s, peer, "b1", messageId = "m1", attachment = att)
+        s.mergeHistory(
+            peer,
+            listOf(ChatMessage(outbound = true, body = "", sentAtMs = 1L, messageId = "m1", attachment = att)),
+        )
+        val msgs = s.messagesFor(peer).value
+        assertEquals(1, msgs.size)
+        assertEquals(att, msgs.single().attachment)
+    }
+
+    @Test
+    fun aColdStartRecoversTheImageFromTheTranscriptWhenTheBubbleLostIt() {
+        // The reported bug, exactly: an image-only DM whose bubble no
+        // longer carries the picture (an old vault entry, or bytes the
+        // engine released once the message was delivered). The bubble
+        // projects first on connect; the transcript entry carrying the
+        // photo used to be discarded as "already shown", leaving a bubble
+        // with nothing in it but a timestamp.
+        val s = ConversationStore()
+        val peer = "a".repeat(64)
+        val att = attachment(1)
+        upsert(s, peer, "b1", messageId = "m1", delivered = true, attachment = null)
+        assertNull(s.messagesFor(peer).value.single().attachment)
+        s.mergeHistory(
+            peer,
+            listOf(ChatMessage(outbound = true, body = "", sentAtMs = 1L, messageId = "m1", attachment = att)),
+        )
+        val msgs = s.messagesFor(peer).value
+        assertEquals("still de-duped to one message", 1, msgs.size)
+        assertEquals("the vault's copy is restored", att, msgs.single().attachment)
+        assertTrue("and the live send state is untouched", msgs.single().delivered)
+    }
+
+    @Test
+    fun aShownImageIsNeverOverwrittenByTheTranscript() {
+        val s = ConversationStore()
+        val peer = "a".repeat(64)
+        val shown = attachment(1)
+        upsert(s, peer, "b1", messageId = "m1", attachment = shown)
+        s.mergeHistory(
+            peer,
+            listOf(
+                ChatMessage(
+                    outbound = true,
+                    body = "",
+                    sentAtMs = 1L,
+                    messageId = "m1",
+                    attachment = attachment(2),
+                ),
+            ),
+        )
+        assertEquals(shown, s.messagesFor(peer).value.single().attachment)
+    }
+
+    @Test
+    fun aReleasedImageIsMarkedSoTheUiCanSaySo() {
+        val s = ConversationStore()
+        val peer = "a".repeat(64)
+        upsert(s, peer, "b1", attachment = null, attachmentDropped = true)
+        val msg = s.messagesFor(peer).value.single()
+        assertNull(msg.attachment)
+        assertTrue(msg.attachmentDropped)
+        // Sticky: a later state of the same bubble does not un-lose it.
+        upsert(s, peer, "b1", attachment = null, attachmentDropped = false)
+        assertTrue(s.messagesFor(peer).value.single().attachmentDropped)
+    }
+
+    @Test
+    fun anOrdinaryMessageIsNeverMarkedAsHavingLostAnImage() {
+        val s = ConversationStore()
+        val peer = "a".repeat(64)
+        upsert(s, peer, "b1")
+        assertFalse(s.messagesFor(peer).value.single().attachmentDropped)
     }
 }

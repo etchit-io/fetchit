@@ -24,6 +24,13 @@ impl From<fetchit_chat::ChatError> for ChatFfiError {
     fn from(e: fetchit_chat::ChatError) -> Self {
         match e {
             fetchit_chat::ChatError::Invalid(reason) => Self::Invalid { reason },
+            // A local refusal, not a network problem: the outbox is
+            // already holding its cap of undelivered images. Mapping it to
+            // Network would send the shell chasing connectivity for
+            // something only the user can clear.
+            other @ fetchit_chat::ChatError::OutboxAttachmentsFull { .. } => Self::Invalid {
+                reason: other.to_string(),
+            },
             other => Self::Network {
                 reason: other.to_string(),
             },
@@ -48,6 +55,18 @@ mod tests {
         assert!(
             matches!(err, ChatFfiError::Network { .. }),
             "expected Network variant"
+        );
+    }
+
+    #[test]
+    fn a_full_attachment_outbox_maps_to_invalid_not_network() {
+        let err = ChatFfiError::from(fetchit_chat::ChatError::OutboxAttachmentsFull {
+            retained: 16,
+            cap: 16,
+        });
+        assert!(
+            matches!(&err, ChatFfiError::Invalid { reason } if reason.contains("image slots")),
+            "a local cap refusal must not read as a network failure: {err:?}",
         );
     }
 

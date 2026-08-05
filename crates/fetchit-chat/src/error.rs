@@ -158,6 +158,25 @@ pub enum ChatError {
         /// Hex agent id of the recipient whose relays all failed.
         recipient: String,
     },
+
+    /// The durable outbox is already holding
+    /// [`crate::outbox::ATTACHMENT_BUBBLE_CAP`] images for messages that
+    /// have not been confirmed delivered, so it will not take another.
+    ///
+    /// Refusing is the honest arm of the retention policy: the alternative
+    /// is accepting the send and dropping the picture from it, which is
+    /// the exact silent degradation the policy exists to prevent. The UI
+    /// should tell the user their earlier photos are still sending; the
+    /// backlog clears itself as those messages are delivered or fail.
+    #[error(
+        "{retained} of {cap} outbox image slots are in use -- wait for earlier photos to send"
+    )]
+    OutboxAttachmentsFull {
+        /// Attachment-bearing bubbles currently retained.
+        retained: usize,
+        /// The cap that was reached ([`crate::outbox::ATTACHMENT_BUBBLE_CAP`]).
+        cap: usize,
+    },
 }
 
 impl From<x0xd_client::DiscoveryError> for ChatError {

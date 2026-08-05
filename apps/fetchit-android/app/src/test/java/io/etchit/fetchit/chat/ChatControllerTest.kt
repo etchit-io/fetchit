@@ -956,6 +956,84 @@ class ChatControllerTest {
     }
 
     @Test
+    fun aColdStartKeepsTheSendersOwnPhotoInTheirThread() = runTest {
+        // The reported bug, driven the way the controller drives it on
+        // connect: the outbox snapshot projects FIRST (startOutboxAndHydrate),
+        // then the transcript is merged (hydrateContacts). An image-only DM
+        // whose bubble no longer carries the picture used to end up as a
+        // bubble with nothing in it but a timestamp, because the transcript
+        // entry that DID carry it was discarded as a duplicate.
+        val peer = "a".repeat(64)
+        val key = ConversationStore.convKeyDm(peer)
+        val convo = ConversationStore()
+        val png = ChatAttachmentFfi("image/png", 8u, 6u, ByteArray(4) { 7 })
+
+        // 1. Cold-start outbox projection: no staged image exists (that
+        //    queue died with the process) and this bubble released its
+        //    bytes when the message was delivered.
+        ChatController.projectOutbox(
+            convo,
+            bubble("b1", peer = peer, body = "", status = SendStateFfi.DELIVERED, messageId = "m1"),
+        )
+        assertNull(convo.messagesFor(key).value.single().attachment)
+
+        // 2. Transcript hydration: the vault kept the image.
+        val gw = FakeGateway().apply {
+            history = mapOf(
+                key to listOf(
+                    historyMsg(body = "", sentAtMs = 1L, messageId = "m1", outbound = true, attachment = png),
+                ),
+            )
+        }
+        ChatController.hydrateConversationVia(gw, key, convo, logWarn = { _, _ -> })
+
+        val msgs = convo.messagesFor(key).value
+        assertEquals("still one message, not a duplicate", 1, msgs.size)
+        assertEquals(png.bytes.toList(), msgs.single().attachment?.bytes?.toList())
+    }
+
+    @Test
+    fun aDurableBubbleCarriesItsImageStraightIntoTheThread() {
+        // The other half: a bubble that still holds its image needs no
+        // transcript and no staged copy at all.
+        val peer = "a".repeat(64)
+        val key = ConversationStore.convKeyDm(peer)
+        val convo = ConversationStore()
+        val png = ChatAttachmentFfi("image/png", 8u, 6u, ByteArray(4) { 9 })
+
+        ChatController.projectOutbox(
+            convo,
+            bubble("b1", peer = peer, body = "", status = SendStateFfi.SENT, attachment = png),
+        )
+
+        val msg = convo.messagesFor(key).value.single()
+        assertEquals(png.bytes.toList(), msg.attachment?.bytes?.toList())
+        assertTrue(!msg.attachmentDropped)
+    }
+
+    @Test
+    fun aReleasedImageReachesTheThreadAsAnExplicitLoss() {
+        val peer = "a".repeat(64)
+        val key = ConversationStore.convKeyDm(peer)
+        val convo = ConversationStore()
+
+        ChatController.projectOutbox(
+            convo,
+            bubble(
+                "b1",
+                peer = peer,
+                body = "",
+                status = SendStateFfi.FAILED,
+                attachmentDropped = true,
+            ),
+        )
+
+        val msg = convo.messagesFor(key).value.single()
+        assertNull(msg.attachment)
+        assertTrue(msg.attachmentDropped)
+    }
+
+    @Test
     fun hydrateNullGatewayIsNoOp() = runTest {
         val key = ConversationStore.convKeyDm("a".repeat(64))
         val convo = ConversationStore()
@@ -1006,6 +1084,8 @@ class ChatControllerTest {
         messageId: String? = null,
         lastError: String? = null,
         groupClientMessageId: String? = null,
+        attachment: ChatAttachmentFfi? = null,
+        attachmentDropped: Boolean = false,
     ) = OutboxBubbleFfi(
         id = id,
         peerAgentIdHex = peer,
@@ -1016,5 +1096,7 @@ class ChatControllerTest {
         stateChangedAtMs = 1uL,
         lastError = lastError,
         groupClientMessageId = groupClientMessageId,
+        attachment = attachment,
+        attachmentDropped = attachmentDropped,
     )
 }

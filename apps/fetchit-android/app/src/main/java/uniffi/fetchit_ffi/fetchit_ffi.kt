@@ -1443,7 +1443,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_drive_pending_joins_once() != 45686.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm() != 33041.toShort()) {
+    if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_enqueue_dm() != 39362.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_fetchit_ffi_checksum_method_chatclient_fedi_actor_status() != 12315.toShort()) {
@@ -2267,19 +2267,28 @@ public interface ChatClientInterface {
      * payload as the body. A message may be an image with no text, but
      * not empty on both counts.
      *
-     * The image does NOT ride the durable bubble: `OutboxBubble` stores
-     * the body only, so an engine-driven RESEND of this message goes out
-     * as text (the same fidelity desktop's outbox driver has). The first
-     * send carries it; a shell that wants the optimistic echo to show the
-     * image holds its own copy until the bubble arrives.
+     * The image RIDES the durable bubble, so it comes back on every
+     * [`ChatClient::outbox_snapshot`] and every `Outbox` event
+     * ([`OutboxBubbleFfi::attachment`]) -- including after a restart --
+     * and an engine-driven resend re-delivers the picture rather than a
+     * text-only reduction of the message. A shell should render the
+     * bubble's own attachment and treat any local copy it holds purely
+     * as an optimistic accelerator.
      *
-     * Reply-to is still not carried over the FFI outbox.
+     * Retained images are capped
+     * (`fetchit_chat::outbox::ATTACHMENT_BUBBLE_CAP`); past the cap the
+     * send is refused rather than accepted without its picture.
+     *
+     * Reply-to is not settable over the FFI (no shell surfaces replies
+     * yet); the engine carries it on the bubble when a caller supplies
+     * one, so a resend stays threaded.
      *
      * # Errors
      *
      * [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex,
-     * the client has no chat state, `body` is empty with no attachment, or
-     * the attachment fails the MIME / dimension / size checks.
+     * the client has no chat state, `body` is empty with no attachment,
+     * the attachment fails the MIME / dimension / size checks, or the
+     * outbox is already holding its cap of undelivered images.
      * [`ChatFfiError::Network`] on transport or relay failure.
      */
     suspend fun `enqueueDm`(`toAgentIdHex`: kotlin.String, `body`: kotlin.String, `senderName`: kotlin.String, `attachment`: ChatAttachmentFfi?): kotlin.String
@@ -3495,19 +3504,28 @@ open class ChatClient: Disposable, AutoCloseable, ChatClientInterface
      * payload as the body. A message may be an image with no text, but
      * not empty on both counts.
      *
-     * The image does NOT ride the durable bubble: `OutboxBubble` stores
-     * the body only, so an engine-driven RESEND of this message goes out
-     * as text (the same fidelity desktop's outbox driver has). The first
-     * send carries it; a shell that wants the optimistic echo to show the
-     * image holds its own copy until the bubble arrives.
+     * The image RIDES the durable bubble, so it comes back on every
+     * [`ChatClient::outbox_snapshot`] and every `Outbox` event
+     * ([`OutboxBubbleFfi::attachment`]) -- including after a restart --
+     * and an engine-driven resend re-delivers the picture rather than a
+     * text-only reduction of the message. A shell should render the
+     * bubble's own attachment and treat any local copy it holds purely
+     * as an optimistic accelerator.
      *
-     * Reply-to is still not carried over the FFI outbox.
+     * Retained images are capped
+     * (`fetchit_chat::outbox::ATTACHMENT_BUBBLE_CAP`); past the cap the
+     * send is refused rather than accepted without its picture.
+     *
+     * Reply-to is not settable over the FFI (no shell surfaces replies
+     * yet); the engine carries it on the bubble when a caller supplies
+     * one, so a resend stays threaded.
      *
      * # Errors
      *
      * [`ChatFfiError::Invalid`] when `to_agent_id_hex` is not valid 64-hex,
-     * the client has no chat state, `body` is empty with no attachment, or
-     * the attachment fails the MIME / dimension / size checks.
+     * the client has no chat state, `body` is empty with no attachment,
+     * the attachment fails the MIME / dimension / size checks, or the
+     * outbox is already holding its cap of undelivered images.
      * [`ChatFfiError::Network`] on transport or relay failure.
      */
     @Throws(ChatFfiException::class)
@@ -7044,7 +7062,32 @@ data class OutboxBubbleFfi (
      * bubble reaching `Delivered` back to the one UI message and flip its
      * pending tick to sent. `None` for a DM bubble.
      */
-    var `groupClientMessageId`: kotlin.String?
+    var `groupClientMessageId`: kotlin.String?, 
+    /**
+     * The inline image this DM carries, straight off the DURABLE bubble.
+     *
+     * This is what lets a sent photo still render in the sender's own
+     * thread after a restart: the bubble reloads from the vault with its
+     * image, so the shell never has to rely on an in-memory staging slot
+     * that dies with the process. `None` on a text message, on a group
+     * fan-out copy, on a bubble written before full-fidelity retry, and
+     * on one whose bytes were released at a terminal state -- for that
+     * last case see [`Self::attachment_dropped`], and prefer the
+     * persisted transcript ([`ChatHistoryMessageFfi::attachment`]), which
+     * keeps the image for every message that was actually sent.
+     */
+    var `attachment`: ChatAttachmentFfi?, 
+    /**
+     * `true` when this bubble carried an image the outbox has released
+     * and no transcript entry holds -- the message failed terminally, so
+     * it was never sent and never persisted.
+     *
+     * Render it as an explicit "image not kept" note. The alternative is
+     * a bubble with nothing in it, which silently misreports what the
+     * user sent. Never set for a delivered message, whose image lives on
+     * in the transcript.
+     */
+    var `attachmentDropped`: kotlin.Boolean
 ) {
     
     companion object
@@ -7065,6 +7108,8 @@ public object FfiConverterTypeOutboxBubbleFfi: FfiConverterRustBuffer<OutboxBubb
             FfiConverterULong.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalTypeChatAttachmentFfi.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -7077,7 +7122,9 @@ public object FfiConverterTypeOutboxBubbleFfi: FfiConverterRustBuffer<OutboxBubb
             FfiConverterULong.allocationSize(value.`enqueuedAtMs`) +
             FfiConverterULong.allocationSize(value.`stateChangedAtMs`) +
             FfiConverterOptionalString.allocationSize(value.`lastError`) +
-            FfiConverterOptionalString.allocationSize(value.`groupClientMessageId`)
+            FfiConverterOptionalString.allocationSize(value.`groupClientMessageId`) +
+            FfiConverterOptionalTypeChatAttachmentFfi.allocationSize(value.`attachment`) +
+            FfiConverterBoolean.allocationSize(value.`attachmentDropped`)
     )
 
     override fun write(value: OutboxBubbleFfi, buf: ByteBuffer) {
@@ -7090,6 +7137,8 @@ public object FfiConverterTypeOutboxBubbleFfi: FfiConverterRustBuffer<OutboxBubb
             FfiConverterULong.write(value.`stateChangedAtMs`, buf)
             FfiConverterOptionalString.write(value.`lastError`, buf)
             FfiConverterOptionalString.write(value.`groupClientMessageId`, buf)
+            FfiConverterOptionalTypeChatAttachmentFfi.write(value.`attachment`, buf)
+            FfiConverterBoolean.write(value.`attachmentDropped`, buf)
     }
 }
 
