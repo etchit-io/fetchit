@@ -9253,6 +9253,7 @@ mod tests {
             body_md: "hi".to_owned(),
             created_at_ms: 0,
             reply_to_actor_url: None,
+            reply_to_object_url: None,
             mentions: vec![],
         };
         let err = client.publish_public_post("josh", &post).await.unwrap_err();

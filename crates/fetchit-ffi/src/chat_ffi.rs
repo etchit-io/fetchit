@@ -897,6 +897,46 @@ pub struct FediPostFfi {
     pub liked: bool,
 }
 
+impl From<fetchit_chat::fedi_feed::FediFeedPost> for FediPostFfi {
+    fn from(p: fetchit_chat::fedi_feed::FediFeedPost) -> Self {
+        Self {
+            author_url: p.author_url,
+            author_label: p.author_label,
+            author_name: p.author_name,
+            text: p.text,
+            published: p.published,
+            object_url: p.object_url,
+            mentions: p
+                .mentions
+                .into_iter()
+                .map(|m| FediMentionFfi {
+                    name: m.name,
+                    href: m.href,
+                })
+                .collect(),
+            liked: p.liked,
+        }
+    }
+}
+
+/// The conversation under one post, pulled on demand from the post's
+/// own server. Returned by [`ChatClient::fedi_thread_replies`].
+///
+/// A bare list could not carry the one distinction a thread view needs:
+/// a post nobody has answered and a post whose server does not publish
+/// replies both have zero replies, and they are not the same fact.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FediThreadRepliesFfi {
+    /// Replies oldest-first -- a conversation reads down the page.
+    /// Denylisted authors are already dropped.
+    pub replies: Vec<FediPostFfi>,
+    /// The post's home server published a `replies` collection we could
+    /// read. `false` with an empty list means "this server does not tell
+    /// us about replies"; `true` with an empty list means "nobody has
+    /// replied yet". A view must say which.
+    pub replies_served: bool,
+}
+
 /// One remote account as a profile sheet renders it. Fetched by
 /// [`ChatClient::fedi_profile`] from the account's actor document.
 ///
@@ -1783,6 +1823,15 @@ impl ChatClient {
     /// WebFinger and runs denylist gating before any delivery. Delivery is
     /// best-effort: the report lists accepted + failed inboxes.
     ///
+    /// The two reply arguments do different jobs and both matter.
+    /// `reply_to_actor_url` ADDRESSES the reply -- it is who the activity
+    /// is delivered to and denylist-gated against. `reply_to_object_url`
+    /// THREADS it -- it becomes the note's `inReplyTo`, which a receiving
+    /// server dereferences to find the parent status. Passing an actor
+    /// URL as the object would produce an `inReplyTo` that dereferences
+    /// to a Person, so the reply would be delivered but never appear
+    /// under the post it answers. Both are `None` for a top-level post.
+    ///
     /// # Errors
     /// [`ChatFfiError::Invalid`] when no handle is minted, or the publish
     /// fails before any delivery was attempted.
@@ -1790,6 +1839,7 @@ impl ChatClient {
         &self,
         body_md: String,
         reply_to_actor_url: Option<String>,
+        reply_to_object_url: Option<String>,
     ) -> Result<PublishReportFfi, ChatFfiError> {
         let handle = self
             .fedi_actor_status()
@@ -1804,6 +1854,7 @@ impl ChatClient {
             body_md: body_md.clone(),
             created_at_ms,
             reply_to_actor_url,
+            reply_to_object_url,
             mentions: fetchit_fedi::extract_mentions(&body_md),
         };
         let report = self
@@ -2341,26 +2392,43 @@ impl ChatClient {
             .fetch_fedi_feed(&handle, now_ms)
             .await
             .map_err(ChatFfiError::from)?;
-        Ok(posts
-            .into_iter()
-            .map(|p| FediPostFfi {
-                author_url: p.author_url,
-                author_label: p.author_label,
-                author_name: p.author_name,
-                text: p.text,
-                published: p.published,
-                object_url: p.object_url,
-                mentions: p
-                    .mentions
-                    .into_iter()
-                    .map(|m| FediMentionFfi {
-                        name: m.name,
-                        href: m.href,
-                    })
-                    .collect(),
-                liked: p.liked,
-            })
-            .collect())
+        Ok(posts.into_iter().map(FediPostFfi::from).collect())
+    }
+
+    /// Pull the conversation under one post: GET the post at
+    /// `object_url`, read the `replies` collection its own server
+    /// publishes, and reduce every reply to the same row shape the feed
+    /// uses. Replies come back oldest-first.
+    ///
+    /// Nothing is stored anywhere by this call -- not on the relay, not
+    /// on the bridge, not on the device. It is the same device-side pull
+    /// the feed already is, aimed at one post instead of an outbox, and
+    /// it is capped hard engine-side (at most two collection pages,
+    /// twenty dereferenced replies, fifty replies kept, and one
+    /// wall-clock budget across the lot) so a hostile or enormous thread
+    /// cannot hold the view open.
+    ///
+    /// Like `fedi_profile`, this does NOT require a minted handle --
+    /// reading a public conversation is a read. Without one, every reply
+    /// simply comes back `liked = false`.
+    ///
+    /// # Errors
+    /// [`ChatFfiError::Invalid`] when `object_url` is not a URL, or when
+    /// the POST ITSELF could not be fetched. A thread that only partly
+    /// loads is returned, not refused.
+    pub async fn fedi_thread_replies(
+        &self,
+        object_url: String,
+    ) -> Result<FediThreadRepliesFfi, ChatFfiError> {
+        let thread = self
+            .inner
+            .fetch_fedi_thread(&object_url)
+            .await
+            .map_err(ChatFfiError::from)?;
+        Ok(FediThreadRepliesFfi {
+            replies: thread.replies.into_iter().map(FediPostFfi::from).collect(),
+            replies_served: thread.replies_served,
+        })
     }
 
     /// Fetch the profile of any fediverse account, for the profile

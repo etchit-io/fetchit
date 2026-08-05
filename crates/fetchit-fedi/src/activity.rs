@@ -36,7 +36,22 @@ pub struct PublicPost {
 
     /// Canonical-form actor URL this post is replying to, when
     /// applicable. `None` for top-level posts.
+    ///
+    /// This is the ADDRESSING half of a reply — who the activity is
+    /// delivered to and denylist-gated against. It is deliberately NOT
+    /// what `inReplyTo` carries; see [`Self::reply_to_object_url`].
     pub reply_to_actor_url: Option<String>,
+
+    /// Object id of the POST being replied to, when applicable. `None`
+    /// for top-level posts.
+    ///
+    /// This, and only this, becomes the note's `inReplyTo`. `inReplyTo`
+    /// names an OBJECT: a receiving server dereferences it to find the
+    /// parent status and hang the reply under it. An actor URL there
+    /// dereferences to a Person, so the thread never forms — which is
+    /// why the two live in separate fields rather than one that has to
+    /// mean both.
+    pub reply_to_object_url: Option<String>,
 
     /// Fediverse handles mentioned in the post, in `@user@instance`
     /// form. Resolution to canonical actor URLs happens in Stage 5.2
@@ -82,10 +97,9 @@ pub struct Note {
     pub to: Vec<String>,
     /// Secondary audience — the resolved mention URLs.
     pub cc: Vec<String>,
-    /// Object being replied to, when applicable. We carry the
-    /// replied-to **actor** URL (the chat layer does not thread a
-    /// status URL yet), so threading is approximate until a future
-    /// stage carries the parent object id.
+    /// Object being replied to, when applicable — the PARENT STATUS's
+    /// object id, which is what a receiving server dereferences to hang
+    /// this reply under it.
     #[serde(rename = "inReplyTo", skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<String>,
     /// `Mention` tags — one per resolved mention.
@@ -124,8 +138,13 @@ pub struct CreateActivity {
 /// `actor_url` is the authoring actor's canonical URL.
 /// `resolved_mentions` pairs each original `@user@instance` handle with
 /// the canonical actor URL it resolved to (via `WebFinger`); they become
-/// both `cc` entries and `Mention` tags. The post's `reply_to_actor_url`
-/// is carried verbatim into the note's `inReplyTo` (see [`Note::in_reply_to`]).
+/// both `cc` entries and `Mention` tags.
+///
+/// The note's `inReplyTo` comes from
+/// [`PublicPost::reply_to_object_url`] and nowhere else. A reply that
+/// names only its target ACTOR still gets delivered and mentioned, but
+/// it goes out as a top-level post rather than carrying an `inReplyTo`
+/// that dereferences to a Person and threads nowhere.
 ///
 /// Body markdown is rendered through [`markdown_body_to_html`], which
 /// escapes all HTML metacharacters — no raw markup is ever emitted, so
@@ -161,7 +180,7 @@ pub fn build_create_note(
         published: published.clone(),
         to: vec![PUBLIC_AUDIENCE.to_owned()],
         cc: cc.clone(),
-        in_reply_to: post.reply_to_actor_url.clone(),
+        in_reply_to: post.reply_to_object_url.clone(),
         tag,
     };
 
@@ -588,6 +607,7 @@ mod tests {
             body_md: "Hello fediverse.".to_owned(),
             created_at_ms: 1_780_876_000_000,
             reply_to_actor_url: Some("https://mastodon.example/users/alice".to_owned()),
+            reply_to_object_url: Some("https://mastodon.example/users/alice/statuses/1".to_owned()),
             mentions: vec!["@alice@mastodon.example".to_owned()],
         }
     }
@@ -778,6 +798,7 @@ mod tests {
             body_md: "Hello fediverse.".to_owned(),
             created_at_ms: 1_700_000_000_000,
             reply_to_actor_url: None,
+            reply_to_object_url: None,
             mentions: vec![],
         };
         let activity = build_create_note(&post, "https://etchit.io/actors/josh", &[]);
@@ -813,6 +834,9 @@ mod tests {
             body_md: "hi".to_owned(),
             created_at_ms: 1_700_000_000_000,
             reply_to_actor_url: Some("https://mastodon.example/users/alice".to_owned()),
+            reply_to_object_url: Some(
+                "https://mastodon.example/users/alice/statuses/42".to_owned(),
+            ),
             mentions: vec!["@alice@mastodon.example".to_owned()],
         };
         let resolved = vec![(
@@ -823,7 +847,15 @@ mod tests {
         let json = serde_json::to_value(&activity).unwrap();
         let note = &json["object"];
 
-        assert_eq!(note["inReplyTo"], "https://mastodon.example/users/alice");
+        // `inReplyTo` names the PARENT STATUS, never the parent's author:
+        // a receiving server dereferences it to find the post to hang
+        // this reply under, and an actor URL there dereferences to a
+        // Person, so the thread would never form.
+        assert_eq!(
+            note["inReplyTo"],
+            "https://mastodon.example/users/alice/statuses/42"
+        );
+        assert_ne!(note["inReplyTo"], "https://mastodon.example/users/alice");
         assert_eq!(json["cc"][0], "https://mastodon.example/users/alice");
         assert_eq!(note["cc"][0], "https://mastodon.example/users/alice");
         assert_eq!(note["tag"][0]["type"], "Mention");
@@ -832,6 +864,34 @@ mod tests {
             "https://mastodon.example/users/alice"
         );
         assert_eq!(note["tag"][0]["name"], "@alice@mastodon.example");
+    }
+
+    /// The two reply fields do separate jobs and must not be confused
+    /// for one another: the actor URL addresses and gates the delivery,
+    /// the object URL threads the post.
+    #[test]
+    fn in_reply_to_comes_only_from_the_object_url() {
+        let mut post = sample();
+
+        // Object id present: it is what rides.
+        post.reply_to_object_url = Some("https://m.example/users/a/statuses/7".to_owned());
+        let note = build_create_note(&post, "https://etchit.io/actors/josh", &[]).object;
+        assert_eq!(
+            note.in_reply_to.as_deref(),
+            Some("https://m.example/users/a/statuses/7")
+        );
+
+        // Only an actor URL: the post goes out top-level rather than
+        // carrying an `inReplyTo` that threads nowhere. The addressing
+        // half is untouched -- the recipient still gets it.
+        post.reply_to_object_url = None;
+        post.reply_to_actor_url = Some("https://m.example/users/a".to_owned());
+        let note = build_create_note(&post, "https://etchit.io/actors/josh", &[]).object;
+        assert!(note.in_reply_to.is_none());
+
+        // Absent on the wire entirely, not serialized as null.
+        let json = serde_json::to_value(&note).unwrap();
+        assert!(json.get("inReplyTo").is_none());
     }
 
     #[test]

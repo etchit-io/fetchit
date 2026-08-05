@@ -14,6 +14,7 @@ use crate::actor::{
 };
 use crate::attestation::ActorAttestationV2;
 use serde_json::Value;
+use std::time::{Duration, Instant};
 
 /// A remote actor as seen by the lookup path. Every field beyond the
 /// identity pair is optional; trust is established exclusively by
@@ -380,6 +381,370 @@ pub async fn fetch_outbox_posts(
         Some(embedded @ Value::Object(_)) => Ok(posts_from_outbox_page(embedded, cap)),
         _ => Ok(Vec::new()),
     }
+}
+
+// ── thread replies ────────────────────────────────────────────────────
+//
+// A reply lives in the REPLIER's outbox on THEIR server, so walking the
+// accounts we follow can never surface it. An `ActivityPub` Note carries
+// a `replies` Collection instead, and Mastodon populates it — so a
+// thread is pulled on demand exactly the way the feed is pulled, and
+// nothing is stored anywhere on our side.
+
+/// Replies retained for one thread. A hostile — or merely enormous —
+/// thread has to cost a bounded amount of memory and screen, and fifty
+/// is well past the point where a reader opens the post on its home
+/// server instead.
+pub const MAX_THREAD_REPLIES: usize = 50;
+
+/// Collection/page GETs spent walking one thread's `replies`.
+///
+/// Mastodon's replies collection is deliberately two-staged: the inline
+/// `first` page carries the author's OWN self-replies (usually empty)
+/// and its `next` — `?only_other_accounts=true` — is where everybody
+/// else's replies live. One page fetch would therefore show an empty
+/// room for almost every real thread; two is the smallest number that
+/// shows the conversation, and also the ceiling, because every page is a
+/// round trip whose timing a remote server chooses.
+pub const MAX_THREAD_REPLY_PAGES: usize = 2;
+
+/// Reply objects dereferenced per thread. Mastodon reduces every
+/// non-local reply in the collection to a bare URI string, so most
+/// entries cost their own GET; uncapped, one popular post would mean
+/// fifty requests from a phone.
+pub const MAX_THREAD_REPLY_FETCHES: usize = 20;
+
+/// Wall-clock ceiling for one whole thread pull, across every request it
+/// makes. [`ACTOR_FETCH_TIMEOUT`] bounds each request on its own, but a
+/// server answering slowly-but-legally to twenty of them would still
+/// hold a view open for minutes. Whatever has been collected when the
+/// budget runs out is what the caller gets.
+pub const THREAD_FETCH_BUDGET: Duration = Duration::from_secs(20);
+
+/// One entry in a replies collection page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReplyEntry {
+    /// The page carried the whole object; nothing left to fetch.
+    Inline(RemotePost),
+    /// The page carried only the reply's URI — what Mastodon serves for
+    /// every reply that is not local to the collection's own server.
+    Url(String),
+}
+
+/// One parsed replies page: the entries it carried plus the `next` page
+/// when it names one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepliesPage {
+    /// Entries in served order, capped by the caller's `cap`.
+    pub entries: Vec<ReplyEntry>,
+    /// `next` page URL as served, when the page names one.
+    pub next: Option<String>,
+}
+
+/// One thread as a reader shows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ThreadReplies {
+    /// Replies oldest-first, capped at [`MAX_THREAD_REPLIES`].
+    pub replies: Vec<RemotePost>,
+    /// The post's document carried a `replies` collection we could read.
+    ///
+    /// Not decoration: "nobody has replied" and "this server does not
+    /// publish replies" are different facts about the world, and a
+    /// reader that draws them identically is lying about one of them.
+    pub collection_served: bool,
+}
+
+/// The host of `url`, lowercased; `None` for anything unparsable or
+/// hostless.
+fn host_of(url: &str) -> Option<String> {
+    url.parse::<url::Url>()
+        .ok()?
+        .host_str()
+        .map(str::to_lowercase)
+}
+
+/// Whether an object served by `origin_host` may claim `author_url`.
+///
+/// A replies collection is a list of URLs its own server chose, and an
+/// inlined object is bytes that server wrote. Without this rule any host
+/// could serve a reply attributed to somebody else's actor and it would
+/// render under that person's name. `ActivityPub`'s authoritative-origin
+/// rule is the answer: a document is evidence only about actors on the
+/// host that served it.
+fn author_matches_origin(author_url: &str, origin_host: &str) -> bool {
+    host_of(author_url).is_some_and(|h| h == origin_host)
+}
+
+/// A `Note`, or a `Create` wrapping one, reduced to a [`RemotePost`].
+/// Both shapes turn up inside replies collections.
+fn post_from_object(value: &Value) -> Option<RemotePost> {
+    match value.get("type").and_then(Value::as_str).unwrap_or("") {
+        "Create" => {
+            let activity_actor = value.get("actor").and_then(Value::as_str);
+            let obj = value.get("object")?;
+            if obj.get("type").and_then(Value::as_str) == Some("Note") {
+                post_from_note(obj, activity_actor)
+            } else {
+                None
+            }
+        }
+        "Note" => post_from_note(value, None),
+        _ => None,
+    }
+}
+
+/// `next` as a URL, whether the page serves it as a string or as a
+/// `CollectionPage` object naming its own `id`.
+fn next_page_url(page: &Value) -> Option<String> {
+    match page.get("next")? {
+        Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_owned())
+            }
+        }
+        v @ Value::Object(_) => optional_str(v, "id"),
+        _ => None,
+    }
+}
+
+/// Pure parse of one replies page, tolerating every shape servers
+/// actually serve: `items` or `orderedItems`; entries that are bare URI
+/// strings, bare `Note` objects, `Create` activities wrapping one, or
+/// stubs carrying only an `id`.
+///
+/// `origin_host` is the host that served the page. An inline object
+/// attributed to an actor on a DIFFERENT host is dropped: an inlined
+/// object is bytes the origin wrote, and without the
+/// authoritative-origin rule any host could serve a reply attributed to
+/// somebody else's actor and it would render under that person's name.
+/// Malformed entries are skipped, never fatal: one junk item costs that
+/// reply, not the thread.
+#[must_use]
+pub fn replies_page_from_value(page: &Value, origin_host: &str, cap: usize) -> RepliesPage {
+    let items = page
+        .get("items")
+        .or_else(|| page.get("orderedItems"))
+        .and_then(Value::as_array);
+    let mut entries = Vec::new();
+    for item in items.into_iter().flatten() {
+        if entries.len() >= cap {
+            break;
+        }
+        match item {
+            Value::String(uri) => {
+                let trimmed = uri.trim();
+                if !trimmed.is_empty() {
+                    entries.push(ReplyEntry::Url(trimmed.to_owned()));
+                }
+            }
+            Value::Object(_) => {
+                if let Some(post) = post_from_object(item) {
+                    if author_matches_origin(&post.author_url, origin_host) {
+                        entries.push(ReplyEntry::Inline(post));
+                    }
+                } else if let Some(id) = optional_str(item, "id") {
+                    // A stub carrying an id and no content: the object
+                    // itself is one dereference away.
+                    entries.push(ReplyEntry::Url(id));
+                }
+            }
+            _ => {}
+        }
+    }
+    RepliesPage {
+        entries,
+        next: next_page_url(page),
+    }
+}
+
+/// Drop entries naming a reply already collected, keeping first-seen
+/// order. A `next` page can repeat what the page before it carried, and
+/// a repeat costs a wasted dereference and a duplicated row.
+fn dedup_entries(entries: Vec<ReplyEntry>) -> Vec<ReplyEntry> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let key = match &entry {
+            ReplyEntry::Inline(post) => post.object_url.clone(),
+            ReplyEntry::Url(uri) => uri.clone(),
+        };
+        // A reply with no identity at all can't be de-duped; keep it
+        // rather than collapsing every such reply into one row.
+        if key.is_empty() || seen.insert(key) {
+            out.push(entry);
+        }
+    }
+    out
+}
+
+/// Order a thread the way it is read: down the page, oldest first.
+///
+/// UTC ISO-8601 sorts lexicographically. A reply with no stamp goes LAST
+/// rather than first — an empty string sorts before every date, and
+/// calling an undated reply the oldest one is a claim we cannot make.
+fn sort_oldest_first(replies: &mut [RemotePost]) {
+    replies.sort_by(|a, b| {
+        (a.published.is_empty(), &a.published).cmp(&(b.published.is_empty(), &b.published))
+    });
+}
+
+/// Fetch one collection page, refusing to leave the origin host and to
+/// exceed either budget. `None` for every refusal and every failure —
+/// the walk simply stops with what it already has.
+async fn fetch_reply_page(
+    url_str: &str,
+    origin_host: &str,
+    deadline: Instant,
+    pages_fetched: &mut usize,
+) -> Option<Value> {
+    if *pages_fetched >= MAX_THREAD_REPLY_PAGES || Instant::now() >= deadline {
+        return None;
+    }
+    let url: url::Url = url_str.parse().ok()?;
+    // A collection page for this post's thread lives on the server that
+    // served the post. A `first`/`next` pointing elsewhere is the remote
+    // steering our reader onto a host of its choosing, so it is refused
+    // rather than followed.
+    if url.host_str().map(str::to_lowercase).as_deref() != Some(origin_host) {
+        return None;
+    }
+    *pages_fetched += 1;
+    let client = pinned_no_redirect_client(&url, ACTOR_FETCH_TIMEOUT)
+        .await
+        .ok()?;
+    fetch_json_ld_at_url(&client, &url, ACTOR_FETCH_TIMEOUT)
+        .await
+        .ok()
+}
+
+/// Dereference one reply URI and reduce it. `None` for anything that
+/// fails — an unreachable, oversized, unparsable or misattributed reply
+/// costs itself and nothing else.
+async fn fetch_reply_object(uri: &str) -> Option<RemotePost> {
+    let url: url::Url = uri.parse().ok()?;
+    let host = url.host_str()?.to_lowercase();
+    let client = pinned_no_redirect_client(&url, ACTOR_FETCH_TIMEOUT)
+        .await
+        .ok()?;
+    let value = fetch_json_ld_at_url(&client, &url, ACTOR_FETCH_TIMEOUT)
+        .await
+        .ok()?;
+    let post = post_from_object(&value)?;
+    author_matches_origin(&post.author_url, &host).then_some(post)
+}
+
+/// Pull the replies to the post at `object_url`, on demand and without
+/// storing anything anywhere.
+///
+/// GET the object, read its `replies` value, and walk it: a bare URL is
+/// fetched, an inline `Collection` is followed through `first`, a
+/// `CollectionPage`'s `items`/`orderedItems` are read, and `next` is
+/// followed while both budgets hold ([`MAX_THREAD_REPLY_PAGES`],
+/// [`THREAD_FETCH_BUDGET`]). Entries that are bare URIs are dereferenced
+/// up to [`MAX_THREAD_REPLY_FETCHES`] times. Every request rides the
+/// same pinned, redirect-free, size-capped, SSRF-guarded client as
+/// [`fetch_outbox_posts`], with the same per-request timeout.
+///
+/// Replies come back oldest-first and capped at [`MAX_THREAD_REPLIES`].
+/// [`ThreadReplies::collection_served`] separates "no replies yet" from
+/// "this server published no replies collection".
+///
+/// # Errors
+///
+/// [`FetchActorError`] only when the POST ITSELF could not be fetched —
+/// everything after that degrades to fewer replies rather than an error,
+/// because a half-read thread is still a thread.
+pub async fn fetch_thread_replies(object_url: &url::Url) -> Result<ThreadReplies, FetchActorError> {
+    let deadline = Instant::now() + THREAD_FETCH_BUDGET;
+    let client = pinned_no_redirect_client(object_url, ACTOR_FETCH_TIMEOUT).await?;
+    let object = fetch_json_ld_at_url(&client, object_url, ACTOR_FETCH_TIMEOUT).await?;
+    let Some(origin_host) = object_url.host_str().map(str::to_lowercase) else {
+        return Ok(ThreadReplies::default());
+    };
+
+    let mut pages_fetched = 0usize;
+    let unread = ThreadReplies::default();
+    let Some(replies) = object.get("replies") else {
+        return Ok(unread);
+    };
+    let mut page = match replies {
+        Value::Object(_) => replies.clone(),
+        Value::String(url_str) => {
+            match fetch_reply_page(url_str, &origin_host, deadline, &mut pages_fetched).await {
+                Some(v) => v,
+                // Named but unreadable: we cannot claim the collection
+                // was served, and the reader says so.
+                None => return Ok(unread),
+            }
+        }
+        _ => return Ok(unread),
+    };
+
+    let empty = ThreadReplies {
+        replies: Vec::new(),
+        collection_served: true,
+    };
+    // A Collection wrapping its pages: step into `first` before reading.
+    if page.get("items").is_none() && page.get("orderedItems").is_none() {
+        match page.get("first") {
+            Some(Value::String(first_url)) => {
+                match fetch_reply_page(first_url, &origin_host, deadline, &mut pages_fetched).await
+                {
+                    Some(v) => page = v,
+                    None => return Ok(empty),
+                }
+            }
+            Some(embedded @ Value::Object(_)) => page = embedded.clone(),
+            _ => return Ok(empty),
+        }
+    }
+
+    let mut entries: Vec<ReplyEntry> = Vec::new();
+    loop {
+        let room = MAX_THREAD_REPLIES.saturating_sub(entries.len());
+        let parsed = replies_page_from_value(&page, &origin_host, room);
+        entries.extend(parsed.entries);
+        entries = dedup_entries(entries);
+        if entries.len() >= MAX_THREAD_REPLIES || Instant::now() >= deadline {
+            break;
+        }
+        let Some(next) = parsed.next else { break };
+        let Some(v) = fetch_reply_page(&next, &origin_host, deadline, &mut pages_fetched).await
+        else {
+            break;
+        };
+        page = v;
+    }
+
+    let mut replies: Vec<RemotePost> = Vec::new();
+    let mut fetches = 0usize;
+    for entry in entries {
+        if replies.len() >= MAX_THREAD_REPLIES {
+            break;
+        }
+        match entry {
+            ReplyEntry::Inline(post) => replies.push(post),
+            ReplyEntry::Url(uri) => {
+                // Out of dereference budget: skip this one, but keep
+                // walking — the inline entries behind it are free.
+                if fetches >= MAX_THREAD_REPLY_FETCHES || Instant::now() >= deadline {
+                    continue;
+                }
+                fetches += 1;
+                if let Some(post) = fetch_reply_object(&uri).await {
+                    replies.push(post);
+                }
+            }
+        }
+    }
+    sort_oldest_first(&mut replies);
+    Ok(ThreadReplies {
+        replies,
+        collection_served: true,
+    })
 }
 
 #[cfg(test)]
@@ -762,5 +1127,282 @@ mod tests {
             {"type":"Note","attributedTo":"https://m.example/u/g","content":""}
         ]});
         assert!(posts_from_outbox_page(&empty, 10).is_empty());
+    }
+
+    // ── thread replies ────────────────────────────────────────────────
+
+    const ORIGIN: &str = "m.example";
+
+    fn inline_note(n: u32) -> Value {
+        serde_json::json!({
+            "type": "Note",
+            "attributedTo": "https://m.example/users/alice",
+            "content": format!("<p>reply {n}</p>"),
+            "published": format!("2026-07-13T06:0{n}:00Z"),
+            "id": format!("https://m.example/notes/{n}"),
+        })
+    }
+
+    fn urls(page: &RepliesPage) -> Vec<&str> {
+        page.entries
+            .iter()
+            .filter_map(|e| match e {
+                ReplyEntry::Url(u) => Some(u.as_str()),
+                ReplyEntry::Inline(_) => None,
+            })
+            .collect()
+    }
+
+    /// The whole shape matrix a replies page can arrive in, one table.
+    #[test]
+    fn every_page_shape_reduces() {
+        struct Case {
+            name: &'static str,
+            page: Value,
+            entries: usize,
+            next: Option<&'static str>,
+        }
+        let cases = vec![
+            Case {
+                name: "no items at all",
+                page: serde_json::json!({ "type": "CollectionPage" }),
+                entries: 0,
+                next: None,
+            },
+            Case {
+                name: "items as bare URIs (the Mastodon remote shape)",
+                page: serde_json::json!({
+                    "type": "CollectionPage",
+                    "items": ["https://other.example/notes/1", "https://x.example/notes/2"],
+                }),
+                entries: 2,
+                next: None,
+            },
+            Case {
+                name: "orderedItems instead of items",
+                page: serde_json::json!({
+                    "type": "OrderedCollectionPage",
+                    "orderedItems": [inline_note(1)],
+                }),
+                entries: 1,
+                next: None,
+            },
+            Case {
+                name: "Create activities wrapping Notes",
+                page: serde_json::json!({
+                    "type": "CollectionPage",
+                    "items": [{
+                        "type": "Create",
+                        "actor": "https://m.example/users/alice",
+                        "object": {
+                            "type": "Note",
+                            "content": "<p>wrapped</p>",
+                            "id": "https://m.example/notes/9",
+                        },
+                    }],
+                }),
+                entries: 1,
+                next: None,
+            },
+            Case {
+                name: "next as a plain string",
+                page: serde_json::json!({
+                    "type": "CollectionPage",
+                    "items": [],
+                    "next": "https://m.example/notes/1/replies?page=2",
+                }),
+                entries: 0,
+                next: Some("https://m.example/notes/1/replies?page=2"),
+            },
+            Case {
+                name: "next as an object naming its own id",
+                page: serde_json::json!({
+                    "type": "CollectionPage",
+                    "items": [],
+                    "next": { "type": "CollectionPage", "id": "https://m.example/r?page=2" },
+                }),
+                entries: 0,
+                next: Some("https://m.example/r?page=2"),
+            },
+        ];
+        for c in cases {
+            let parsed = replies_page_from_value(&c.page, ORIGIN, MAX_THREAD_REPLIES);
+            assert_eq!(parsed.entries.len(), c.entries, "{}", c.name);
+            assert_eq!(parsed.next.as_deref(), c.next, "{}", c.name);
+        }
+    }
+
+    #[test]
+    fn malformed_entries_are_skipped_not_fatal() {
+        let page = serde_json::json!({
+            "items": [
+                42,
+                null,
+                "   ",
+                { "type": "Like", "actor": "https://m.example/users/alice" },
+                { "type": "Note", "attributedTo": "https://m.example/users/alice",
+                  "content": "<p>survives</p>", "id": "https://m.example/notes/1" },
+            ],
+        });
+        let parsed = replies_page_from_value(&page, ORIGIN, MAX_THREAD_REPLIES);
+        // The junk entries are dropped; the Like carries an actor but no
+        // id, so it contributes nothing either.
+        assert_eq!(parsed.entries.len(), 1);
+        assert!(matches!(parsed.entries[0], ReplyEntry::Inline(_)));
+    }
+
+    #[test]
+    fn a_stub_object_with_only_an_id_becomes_a_dereference() {
+        let page = serde_json::json!({
+            "items": [{ "type": "Note", "id": "https://other.example/notes/7" }],
+        });
+        let parsed = replies_page_from_value(&page, ORIGIN, MAX_THREAD_REPLIES);
+        assert_eq!(urls(&parsed), vec!["https://other.example/notes/7"]);
+    }
+
+    /// The authoritative-origin rule. A server may inline replies it
+    /// authored; it may NOT inline a reply attributed to somebody on
+    /// another host, or every instance could put words in any account's
+    /// mouth simply by listing them in its own thread.
+    #[test]
+    fn an_inlined_reply_attributed_off_host_is_dropped() {
+        let forged = serde_json::json!({
+            "type": "Note",
+            "attributedTo": "https://mastodon.social/users/gargron",
+            "content": "<p>I endorse this</p>",
+            "id": "https://evil.example/notes/1",
+        });
+        let page = serde_json::json!({ "items": [forged, inline_note(1)] });
+        let parsed = replies_page_from_value(&page, "evil.example", MAX_THREAD_REPLIES);
+        // Only the entry the origin may speak for survives — and here
+        // that is neither, because inline_note claims m.example.
+        assert!(parsed.entries.is_empty());
+
+        // Served by the host it names: kept.
+        let ok = replies_page_from_value(
+            &serde_json::json!({ "items": [inline_note(1)] }),
+            ORIGIN,
+            MAX_THREAD_REPLIES,
+        );
+        assert_eq!(ok.entries.len(), 1);
+    }
+
+    #[test]
+    fn an_oversized_page_is_truncated_at_the_cap() {
+        let items: Vec<Value> = (0..(MAX_THREAD_REPLIES + 25))
+            .map(|i| serde_json::json!(format!("https://m.example/notes/{i}")))
+            .collect();
+        let page = serde_json::json!({ "items": items });
+        let parsed = replies_page_from_value(&page, ORIGIN, MAX_THREAD_REPLIES);
+        assert_eq!(parsed.entries.len(), MAX_THREAD_REPLIES);
+        // And the caller's own smaller room is honored, which is how the
+        // page walk stops accumulating once it is full.
+        assert_eq!(replies_page_from_value(&page, ORIGIN, 3).entries.len(), 3);
+    }
+
+    #[test]
+    fn a_repeat_across_pages_is_collected_once() {
+        let entries = vec![
+            ReplyEntry::Url("https://m.example/notes/1".into()),
+            ReplyEntry::Inline(post_from_note(&inline_note(2), None).unwrap()),
+            // Both repeats: `next` pages overlap in the wild.
+            ReplyEntry::Url("https://m.example/notes/1".into()),
+            ReplyEntry::Inline(post_from_note(&inline_note(2), None).unwrap()),
+            ReplyEntry::Url("https://m.example/notes/3".into()),
+        ];
+        assert_eq!(dedup_entries(entries).len(), 3);
+    }
+
+    #[test]
+    fn identity_less_entries_are_not_collapsed_into_one() {
+        // Two different replies that each carry no url and no id would
+        // both key on "" — de-duping them would silently eat one.
+        let bare = |body: &str| RemotePost {
+            author_url: "https://m.example/users/alice".to_owned(),
+            content_html: body.to_owned(),
+            published: String::new(),
+            object_url: String::new(),
+            mentions: Vec::new(),
+        };
+        let entries = vec![
+            ReplyEntry::Inline(bare("<p>one</p>")),
+            ReplyEntry::Inline(bare("<p>two</p>")),
+        ];
+        assert_eq!(dedup_entries(entries).len(), 2);
+    }
+
+    #[test]
+    fn replies_read_oldest_first_with_undated_ones_last() {
+        let at = |stamp: &str| RemotePost {
+            author_url: "https://m.example/users/alice".to_owned(),
+            content_html: "<p>x</p>".to_owned(),
+            published: stamp.to_owned(),
+            object_url: format!("https://m.example/notes/{stamp}"),
+            mentions: Vec::new(),
+        };
+        let mut replies = vec![
+            at("2026-07-13T06:05:00Z"),
+            at(""),
+            at("2026-07-13T06:00:00Z"),
+            at("2026-07-12T23:59:59Z"),
+        ];
+        sort_oldest_first(&mut replies);
+        let stamps: Vec<&str> = replies.iter().map(|r| r.published.as_str()).collect();
+        assert_eq!(
+            stamps,
+            vec![
+                "2026-07-12T23:59:59Z",
+                "2026-07-13T06:00:00Z",
+                "2026-07-13T06:05:00Z",
+                "",
+            ],
+            "a stampless reply is not evidence that it is the oldest",
+        );
+    }
+
+    #[test]
+    fn a_thread_pull_never_leaves_the_origin_host() {
+        // The page walk refuses an off-host `first`/`next` before any
+        // socket opens, so the constants below are the whole story: two
+        // pages, twenty dereferences, one wall-clock budget.
+        assert_eq!(MAX_THREAD_REPLY_PAGES, 2);
+        assert_eq!(MAX_THREAD_REPLY_FETCHES, 20);
+        assert_eq!(MAX_THREAD_REPLIES, 50);
+        assert!(THREAD_FETCH_BUDGET.as_secs() >= ACTOR_FETCH_TIMEOUT.as_secs());
+    }
+
+    #[tokio::test]
+    async fn an_off_host_next_page_is_refused_without_a_request() {
+        let mut pages = 0usize;
+        let deadline = Instant::now() + THREAD_FETCH_BUDGET;
+        assert!(
+            fetch_reply_page("https://evil.example/steal", ORIGIN, deadline, &mut pages)
+                .await
+                .is_none(),
+        );
+        assert_eq!(pages, 0, "a refused page must not spend the page budget");
+    }
+
+    #[tokio::test]
+    async fn the_page_budget_stops_the_walk() {
+        let deadline = Instant::now() + THREAD_FETCH_BUDGET;
+        let mut pages = MAX_THREAD_REPLY_PAGES;
+        assert!(
+            fetch_reply_page("https://m.example/r?page=3", ORIGIN, deadline, &mut pages)
+                .await
+                .is_none(),
+        );
+        assert_eq!(pages, MAX_THREAD_REPLY_PAGES);
+        // An exhausted wall-clock budget stops it just as hard.
+        let mut fresh = 0usize;
+        let expired = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("a monotonic clock one second in the past");
+        assert!(
+            fetch_reply_page("https://m.example/r?page=2", ORIGIN, expired, &mut fresh)
+                .await
+                .is_none(),
+        );
+        assert_eq!(fresh, 0);
     }
 }

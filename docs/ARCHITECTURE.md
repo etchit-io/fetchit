@@ -180,7 +180,10 @@ sealed copy of every message sent to its siblings (#342); an expansion filtered
 to nothing raises the same `ChatError::Denied` the anchor check raises. The
 fediverse read feed gates each followed account BEFORE fetching its actor
 document, so a blocked server sees no request at all rather than being fetched
-and then filtered. Every gate composes one helper
+and then filtered; the on-demand thread pull
+(`crate::fedi_replies::Client::fetch_fedi_thread`) gates every reply author the
+same way, so a blocked account cannot re-enter through a conversation it was
+filtered out of the feed for. Every gate composes one helper
 (`public::check_optional_actor_url_denylist`) and fails open when no consumer is
 installed. `crate::report` is the other half of moderation: a user-initiated
 `POST /v1/report` to the trust service naming an actor URL or agent id, a
@@ -359,6 +362,32 @@ actor document into a profile card, accepting `@user@host`, `user@host`, or an
 actor URL -- handle forms resolve through the denylist-gated mention path, URLs
 through its URL-form twin -- and reduces the bio with `fetchit_fedi::text` so no
 remote markup can reach a renderer.
+
+Replies are pulled the same way the feed is, and stored in the same place --
+nowhere. A reply lives in the REPLIER's outbox on THEIR server, so walking the
+accounts a user follows can never surface one; an `ActivityPub` Note publishes a
+`replies` Collection instead. `fetchit_fedi::lookup::fetch_thread_replies` GETs
+the post, walks that collection through every shape servers actually serve (a
+bare URL, an inline `Collection` with `first`, a `CollectionPage`'s `items` or
+`orderedItems`, `next` pagination), and dereferences the bare URIs Mastodon
+serves for non-local replies. Four caps hold it: two collection-page GETs (the
+minimum that reaches Mastodon's `only_other_accounts=true` page, where the
+replies from other people actually are), twenty dereferences, fifty replies, and
+one wall-clock budget across the lot. The walk refuses a `first`/`next` that
+leaves the origin host, and drops any reply whose `attributedTo` names an actor
+on a different host than the document that served it -- without that
+authoritative-origin rule any instance could put words in any account's mouth by
+listing them in its own thread. `fetchit_chat::fedi_replies` gates each reply
+author through the same denylist helper the feed uses and reduces the body with
+`fetchit_fedi::text`. The result carries `replies_served` beside the list,
+because "nobody has replied" and "this server does not publish replies" are
+different facts and a reader that draws them identically is lying about one.
+
+`inReplyTo` names the parent STATUS. `PublicPost` carries the reply target as
+two separate fields for that reason: `reply_to_actor_url` addresses and
+denylist-gates the delivery, `reply_to_object_url` becomes the note's
+`inReplyTo`. An actor URL in that slot dereferences to a Person, so the reply
+would be delivered and never thread.
 
 `Like` / `Undo(Like)` ride the same signed-delivery shape as `Follow`.
 `fetchit_chat::fedi_like` owns the driver plus a sealed, bounded liked-set

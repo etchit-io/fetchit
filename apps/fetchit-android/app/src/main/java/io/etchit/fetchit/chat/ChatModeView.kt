@@ -107,6 +107,11 @@ class ChatModeView(
         data class Thread(val peer: String) : Screen()
         data class GroupThread(val groupId: String) : Screen()
         data class FediThread(val handle: String) : Screen()
+
+        /** The conversation under one fediverse post: the post itself,
+         *  then its replies, pulled on demand from the post's own server
+         *  and stored nowhere. */
+        data class PostThread(val post: FeedPost) : Screen()
     }
 
     private val screenStack = ArrayDeque<Screen>()
@@ -688,6 +693,16 @@ class ChatModeView(
                 sendJob = null
                 slot.removeAllViews()
                 bindFediThreadScreen(screen.handle)
+            }
+            is Screen.PostThread -> {
+                feedCollectJob?.cancel()
+                feedCollectJob = null
+                threadCollectJob?.cancel()
+                threadCollectJob = null
+                sendJob?.cancel()
+                sendJob = null
+                slot.removeAllViews()
+                bindPostThreadScreen(screen.post)
             }
         }
     }
@@ -3035,7 +3050,9 @@ class ChatModeView(
 
         val rv = view.findViewById<RecyclerView>(R.id.feedList)
         rv.layoutManager = LinearLayoutManager(context).apply { stackFromEnd = true }
-        val adapter = MessageAdapter(onOpenAutonomi, onRetry = {})
+        // The feed is the one surface whose rows open a conversation:
+        // inside a thread, a reply row must not offer another one.
+        val adapter = MessageAdapter(onOpenAutonomi, onRetry = {}, onOpenThread = ::openPostThread)
         rv.adapter = adapter
 
         feedCollectJob = lifecycleScope.launch {
@@ -3637,6 +3654,210 @@ class ChatModeView(
     }
 
     /**
+     * Open the conversation under [post].
+     *
+     * A post with no URL of its own — one this device published, or one
+     * restored from a blob written before URLs were carried — has no
+     * thread to open, so the affordance is never offered for it and this
+     * is only a backstop.
+     */
+    private fun openPostThread(post: FeedPost) {
+        if (post.objectUrl.isEmpty()) return
+        showScreen(Screen.PostThread(post), pushToStack = true)
+    }
+
+    /**
+     * The conversation under one fediverse post: the post itself at the
+     * top, then its replies, then a composer.
+     *
+     * Everything here is a live pull from the post's OWN server — the
+     * replies collection an `ActivityPub` Note publishes. Our relay and
+     * our bridge store nothing about it, exactly as they store nothing
+     * about the feed; opening a thread writes no state anywhere.
+     *
+     * The screen is never silently blank. It says it is loading, says it
+     * failed, says nobody has replied, or says this server does not
+     * publish replies — four different facts, four different lines.
+     */
+    private fun bindPostThreadScreen(post: FeedPost) {
+        val view = LayoutInflater.from(context)
+            .inflate(R.layout.view_chat_thread, slot, false)
+        slot.addView(view)
+        val authorAt = authorHandle(post)
+
+        view.findViewById<TextView>(R.id.threadPeerName).text =
+            context.getString(R.string.feed_thread_title)
+        bindFediAvatar(view.findViewById(R.id.threadPeerAvatar), authorAt)
+        view.findViewById<TextView>(R.id.threadPeerShortId).apply {
+            text = context.getString(R.string.feed_thread_sub)
+            setTextColor(themeColor(R.attr.fetchitAsh))
+            isClickable = false
+            setOnClickListener(null)
+        }
+        view.findViewById<View>(R.id.threadBackButton).setOnClickListener { onBack() }
+        view.findViewById<ImageButton>(R.id.threadMembersButton).visibility = View.GONE
+
+        val notice = view.findViewById<TextView>(R.id.threadNotice)
+        val rv = view.findViewById<RecyclerView>(R.id.messageList)
+        // Top-anchored, unlike a chat thread: a conversation is read from
+        // its first word down, not from its newest line up.
+        rv.layoutManager = LinearLayoutManager(context)
+        // No onOpenThread here — inside a thread the reply rows must not
+        // offer to open a thread of their own.
+        val adapter = MessageAdapter(onOpenAutonomi, onRetry = {})
+        rv.adapter = adapter
+
+        val replies = ArrayList<FeedPost>()
+        fun render() {
+            adapter.submitList(
+                listOf(MessageRow.Post(post)) + replies.map { MessageRow.Post(it) },
+            )
+        }
+        render()
+
+        // A state line the user can act on. Only the failed line is
+        // tappable, and it says so — a "tap to retry" on a line that
+        // retries nothing would be the same dishonesty as a blank screen.
+        fun say(res: Int, retry: (() -> Unit)? = null) {
+            notice.visibility = View.VISIBLE
+            notice.text = context.getString(res)
+            notice.isClickable = retry != null
+            notice.setOnClickListener(retry?.let { r -> View.OnClickListener { r() } })
+            if (retry == null) {
+                notice.background = null
+            } else {
+                notice.setBackgroundResource(
+                    themeResource(android.R.attr.selectableItemBackground),
+                )
+            }
+        }
+
+        bindPostThreadCompose(view, post, replies) { render() }
+
+        fun load() {
+            say(R.string.feed_thread_loading)
+            threadCollectJob?.cancel()
+            threadCollectJob = lifecycleScope.launch {
+                val gw = runCatching { connectWithFeedback() }.getOrElse {
+                    say(R.string.feed_thread_failed) { load() }
+                    return@launch
+                }
+                val thread = runCatching { gw.fediThreadReplies(post.objectUrl) }.getOrElse { e ->
+                    Log.w(TAG, "fediThreadReplies: ${ffiReason(e)}", e)
+                    say(R.string.feed_thread_failed) { load() }
+                    return@launch
+                }
+                // Block on every identity a reply carries, exactly as the
+                // feed does: entries live on this device under whichever
+                // form the blocking surface held.
+                val pulled = FediThreadRows.replies(thread.replies, ::parseIsoToMs)
+                    .filterNot {
+                        blockStore.isAnyBlocked(it.authorLabel, fediActorDisplay(it.authorUrl))
+                    }
+                // A reply this device sent moments ago is already on
+                // screen; keep it and let the pulled ones sit above it.
+                val mine = ArrayList(replies)
+                replies.clear()
+                replies.addAll(pulled)
+                replies.addAll(mine.filterNot { m -> pulled.any { it.body == m.body } })
+                render()
+                when (FediThreadRows.state(replies.size, thread.repliesServed)) {
+                    is FediThreadState.Loaded -> notice.visibility = View.GONE
+                    FediThreadState.NoRepliesYet -> say(R.string.feed_thread_empty)
+                    FediThreadState.RepliesNotPublished -> say(R.string.feed_thread_not_published)
+                    FediThreadState.Loading, FediThreadState.Failed -> notice.visibility = View.GONE
+                }
+            }
+        }
+        load()
+    }
+
+    /**
+     * The reply composer on a post thread.
+     *
+     * Pre-addressed to the post's author: a fediverse reply only reaches
+     * the person it answers if it mentions them, so the draft is part of
+     * the reply working, not a nicety. Sending routes through
+     * [ChatGateway.fediPublish] with BOTH reply targets — the author URL
+     * addresses the delivery, the post URL threads it — and the reply
+     * appears under the post immediately.
+     *
+     * With no minted @handle the row states plainly that one is needed
+     * rather than failing at the moment of send.
+     */
+    private fun bindPostThreadCompose(
+        view: View,
+        post: FeedPost,
+        replies: MutableList<FeedPost>,
+        onAppended: () -> Unit,
+    ) {
+        val messageInput = view.findViewById<EditText>(R.id.messageInput)
+        val sendButton = view.findViewById<View>(R.id.sendButton)
+        view.findViewById<View>(R.id.threadSendRow).visibility = View.VISIBLE
+        // The open-fediverse rail carries no inline attachment.
+        hideAttachAffordance(view)
+
+        val myHandle = controller.fediActorStatus()
+        if (myHandle == null) {
+            messageInput.hint = context.getString(R.string.feed_thread_needs_handle)
+            messageInput.isEnabled = false
+            sendButton.isEnabled = false
+            sendButton.setOnClickListener(null)
+            return
+        }
+        messageInput.hint = context.getString(R.string.feed_thread_reply_hint, myHandle)
+        val draft = FediThreadRows.replyDraft(post)
+        if (draft.isNotEmpty()) {
+            messageInput.setText(draft)
+            messageInput.setSelection(draft.length)
+        }
+        bindSendEnabled(messageInput, sendButton)
+        sendButton.setOnClickListener {
+            val body = messageInput.text.toString().trim()
+            if (body.isEmpty()) return@setOnClickListener
+            messageInput.setText("")
+            lifecycleScope.launch {
+                val gw = runCatching { connectWithFeedback() }.getOrElse {
+                    if (screenStack.lastOrNull() == Screen.PostThread(post)) {
+                        messageInput.setText(body)
+                    }
+                    return@launch
+                }
+                runCatching {
+                    gw.fediPublish(
+                        body,
+                        post.authorUrl.ifEmpty { null },
+                        post.objectUrl.ifEmpty { null },
+                    )
+                }
+                    .onSuccess {
+                        // Our own reply comes back from no server, so it is
+                        // a body-keyed record with no URLs — the same shape
+                        // the feed's own posts take.
+                        replies.add(
+                            FeedPost(
+                                authorLabel = "@$myHandle@$HOME_INSTANCE",
+                                body = body,
+                                receivedAtMs = System.currentTimeMillis(),
+                            ),
+                        )
+                        onAppended()
+                        view.findViewById<TextView>(R.id.threadNotice).visibility = View.GONE
+                        snackbar(context.getString(R.string.feed_thread_reply_sent))
+                    }
+                    .onFailure { e ->
+                        if (screenStack.lastOrNull() == Screen.PostThread(post)) {
+                            messageInput.setText(body)
+                        }
+                        snackbar(
+                            userFacingError(e, "fediPublish", R.string.feed_thread_reply_failed),
+                        )
+                    }
+            }
+        }
+    }
+
+    /**
      * Wire the feed's compose row. Posting is public and needs a minted
      * @handle: with one, the send row appears with a "post publicly as @name"
      * hint (the public/non-PQ contract stated at the moment of typing) and
@@ -3687,7 +3908,7 @@ class ChatModeView(
                     if (screenStack.lastOrNull() == Screen.Feed) messageInput.setText(body)
                     return@launch
                 }
-                runCatching { gw.fediPublish(body, null) }
+                runCatching { gw.fediPublish(body, null, null) }
                     .onSuccess {
                         // Our own post: no object URL comes back from the
                         // publish call, so it stays a body-keyed record.
@@ -4217,6 +4438,10 @@ class ChatModeView(
     private inner class MessageAdapter(
         private val onLinkTap: (String) -> Unit,
         private val onRetry: () -> Unit,
+        /** Open the conversation under a feed post. Null on every surface
+         *  that is already a conversation — a reply row inside a thread
+         *  must not offer to open a thread of its own. */
+        private val onOpenThread: ((FeedPost) -> Unit)? = null,
     ) : ListAdapter<MessageRow, RecyclerView.ViewHolder>(msgDiff) {
 
         override fun getItemViewType(position: Int): Int =
@@ -4279,6 +4504,7 @@ class ChatModeView(
             private val cards: LinearLayout = itemView.findViewById(R.id.messageCards)
             private val meta: TextView = itemView.findViewById(R.id.messageMeta)
             private val like: TextView = itemView.findViewById(R.id.messageLike)
+            private val replies: TextView = itemView.findViewById(R.id.messageReplies)
             private val image: ImageView = itemView.findViewById(R.id.messageImage)
 
             fun bindDm(
@@ -4294,6 +4520,8 @@ class ChatModeView(
                 clearAuthorChip()
                 like.visibility = View.GONE
                 like.setOnClickListener(null)
+                replies.visibility = View.GONE
+                replies.setOnClickListener(null)
                 if (msg.outbound) {
                     // Self keeps the copper out-bubble; the who-is-who accent is
                     // inbound-only, so no sender label or identity tint here.
@@ -4458,12 +4686,21 @@ class ChatModeView(
                 bubble.textAlignment = View.TEXT_ALIGNMENT_TEXT_START
                 // Feed body is plain text (HTML stripped by the pump); linkify any
                 // autonomi:// addresses so they open in the reader, like DM
-                // bubbles, plus every @-mention the post carried.
-                applyLinkedText(bubble, post.body, onLinkTap, post.mentions) { m ->
-                    showFediProfileSheet(m.href, m.name)
-                }
+                // bubbles, plus every @-mention the post carried. A tap on the
+                // words AROUND those spans opens the conversation — the spans
+                // keep their own taps.
+                val openThread = onOpenThread?.takeIf { post.objectUrl.isNotEmpty() }
+                applyLinkedText(
+                    bubble,
+                    post.body,
+                    onLinkTap,
+                    post.mentions,
+                    onMention = { m -> showFediProfileSheet(m.href, m.name) },
+                    onBodyTap = openThread?.let { open -> { open(post) } },
+                )
                 addressCards.bind(cards, post.body)
                 bindLike(post)
+                bindReplies(post, openThread)
                 // Honesty badge: fediverse posts are public + non-PQ (mirrors desktop).
                 meta.text = context.getString(R.string.chat_feed_post_public_badge)
             }
@@ -4504,6 +4741,28 @@ class ChatModeView(
             }
 
             /**
+             * The open-the-conversation control.
+             *
+             * The body is tappable too, but a tap handled inside a
+             * movement method is invisible to TalkBack and undiscoverable
+             * to anyone who does not already know it is there, so the
+             * action also gets a real, focusable control. Hidden when
+             * there is no thread to open: a post with no URL of its own,
+             * or a row already inside a thread.
+             */
+            private fun bindReplies(post: FeedPost, open: ((FeedPost) -> Unit)?) {
+                if (open == null) {
+                    replies.visibility = View.GONE
+                    replies.setOnClickListener(null)
+                    return
+                }
+                replies.visibility = View.VISIBLE
+                replies.text = context.getString(R.string.feed_replies_glyph)
+                replies.contentDescription = context.getString(R.string.feed_replies_desc)
+                replies.setOnClickListener { open(post) }
+            }
+
+            /**
              * Set [bubble]'s text with any `autonomi://<addr>` occurrences turned
              * into tappable spans that open the address via [onLink]; plain text
              * (no movement method) when there are none. Shared by inbound DM/group
@@ -4513,7 +4772,7 @@ class ChatModeView(
                 bubble: TextView,
                 body: String,
                 onLink: (String) -> Unit,
-            ) = applyLinkedText(bubble, body, onLink, emptyList()) {}
+            ) = applyLinkedText(bubble, body, onLink, emptyList(), onMention = {})
 
             /**
              * [applyAutonomiLinkedText] plus a tappable span over each
@@ -4523,6 +4782,13 @@ class ChatModeView(
              * the mention matcher as off-limits, so the two span kinds can
              * never overlap on the same characters — two ClickableSpans on one
              * range makes which one fires a matter of insertion order.
+             *
+             * [onBodyTap], when given, fires for a tap that lands on the
+             * words BETWEEN the spans. It cannot be an `OnClickListener`:
+             * `TextView` runs `View`'s click handling before the movement
+             * method, so a tap on a mention would fire both the span and
+             * the listener. [BodyTapMovementMethod] decides in the one
+             * place where the span under the finger is already known.
              */
             private fun applyLinkedText(
                 bubble: TextView,
@@ -4530,7 +4796,10 @@ class ChatModeView(
                 onLink: (String) -> Unit,
                 mentions: List<FeedMention>,
                 onMention: (FeedMention) -> Unit,
+                onBodyTap: (() -> Unit)? = null,
             ) {
+                // A recycled row must not keep the previous message's tap.
+                bubble.setOnClickListener(null)
                 val addresses = ChatUris.autonomiAddresses(body)
                 val linkRanges = ArrayList<IntRange>()
                 addresses.forEach { addr ->
@@ -4546,6 +4815,9 @@ class ChatModeView(
                 if (linkRanges.isEmpty() && mentionSpans.isEmpty()) {
                     bubble.text = body
                     bubble.movementMethod = null
+                    // No spans to compete with, so a plain listener is
+                    // exactly right here.
+                    onBodyTap?.let { tap -> bubble.setOnClickListener { tap() } }
                     return
                 }
                 val spannable = SpannableString(body)
@@ -4580,7 +4852,9 @@ class ChatModeView(
                     )
                 }
                 bubble.text = spannable
-                bubble.movementMethod = LinkMovementMethod.getInstance()
+                bubble.movementMethod = onBodyTap
+                    ?.let { tap -> BodyTapMovementMethod(tap) }
+                    ?: LinkMovementMethod.getInstance()
             }
 
             /**

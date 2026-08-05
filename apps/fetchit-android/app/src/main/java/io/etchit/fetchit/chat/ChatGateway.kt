@@ -20,6 +20,7 @@ import uniffi.fetchit_ffi.UnfollowReportFfi
 import uniffi.fetchit_ffi.FediDmReportFfi
 import uniffi.fetchit_ffi.FediPersonLinkFfi
 import uniffi.fetchit_ffi.FediProfileFfi
+import uniffi.fetchit_ffi.FediThreadRepliesFfi
 import uniffi.fetchit_ffi.FediThreadSummaryFfi
 import uniffi.fetchit_ffi.GoPrivateReportFfi
 import uniffi.fetchit_ffi.FollowReportFfi
@@ -202,8 +203,20 @@ interface ChatGateway {
      * the report lists accepted + failed inboxes. Throws when no handle is
      * minted yet — gate the compose affordance on
      * [fediActorStatus] instead of letting that surface.
+     *
+     * The two reply arguments do different jobs. [replyToActorUrl]
+     * ADDRESSES the reply — who it is delivered to and gated against.
+     * [replyToObjectUrl] THREADS it — it becomes the note's `inReplyTo`,
+     * which the receiving server dereferences to find the parent status.
+     * An actor URL in the object slot dereferences to a Person, so the
+     * reply would arrive but never hang under the post it answers. Both
+     * null for a top-level post.
      */
-    suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi
+    suspend fun fediPublish(
+        bodyMd: String,
+        replyToActorUrl: String?,
+        replyToObjectUrl: String?,
+    ): PublishReportFfi
 
     /** Follow a remote fediverse account (`@user@instance`) from the minted handle. */
     suspend fun fediFollow(target: String): FollowReportFfi
@@ -243,6 +256,19 @@ interface ChatGateway {
      * an empty list is a valid (quiet) feed.
      */
     suspend fun fediFeed(): List<FediPostFfi>
+
+    /**
+     * Pull the conversation under one post: the engine GETs the post at
+     * [objectUrl] and reads the `replies` collection its own server
+     * publishes, capped hard engine-side. Nothing is stored anywhere by
+     * this call — not on the relay, not on the bridge, not on disk.
+     *
+     * `repliesServed` separates "nobody has replied" from "this server
+     * does not publish replies"; a thread view must say which. Like
+     * [fediProfile], not gated on a minted handle — reading a public
+     * conversation is a read.
+     */
+    suspend fun fediThreadReplies(objectUrl: String): FediThreadRepliesFfi
 
     /**
      * Fetch any fediverse account's profile for the profile sheet.
@@ -531,8 +557,11 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override fun fediMintState(): MintStateFfi? = inner.fediMintState()
     override suspend fun fediMint(handle: String): MintOutcomeFfi = inner.fediMint(handle)
     override suspend fun fediLookup(handle: String): LookupFfi = inner.fediLookup(handle)
-    override suspend fun fediPublish(bodyMd: String, replyToActorUrl: String?): PublishReportFfi =
-        inner.fediPublish(bodyMd, replyToActorUrl)
+    override suspend fun fediPublish(
+        bodyMd: String,
+        replyToActorUrl: String?,
+        replyToObjectUrl: String?,
+    ): PublishReportFfi = inner.fediPublish(bodyMd, replyToActorUrl, replyToObjectUrl)
 
     override suspend fun fediFollow(target: String): FollowReportFfi = inner.fediFollow(target)
     override suspend fun fediDm(target: String, body: String): FediDmReportFfi =
@@ -542,6 +571,8 @@ class FfiChatGateway(private val inner: ChatClient) : ChatGateway {
     override suspend fun fediUnfollow(targetActorUrl: String): UnfollowReportFfi =
         inner.fediUnfollow(targetActorUrl)
     override suspend fun fediFeed(): List<FediPostFfi> = inner.fediFeed()
+    override suspend fun fediThreadReplies(objectUrl: String): FediThreadRepliesFfi =
+        inner.fediThreadReplies(objectUrl)
     override suspend fun fediProfile(target: String): FediProfileFfi = inner.fediProfile(target)
     override suspend fun fediReport(actorUrl: String, reason: String, comment: String) =
         inner.fediReport(actorUrl, reason, comment)

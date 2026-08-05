@@ -227,6 +227,7 @@ pub async fn fediverse_publish(
     chat_state: tauri::State<'_, ChatState>,
     body_md: String,
     reply_to_actor_url: Option<String>,
+    reply_to_object_url: Option<String>,
 ) -> Result<PublishReportDto, String> {
     ensure_chat_enabled(&app_state)?;
     let handle = app_state
@@ -246,6 +247,7 @@ pub async fn fediverse_publish(
         body_md: body_md.clone(),
         created_at_ms,
         reply_to_actor_url,
+        reply_to_object_url,
         mentions: extract_mentions(&body_md),
     };
     let client = chat_state.get().await?;

@@ -182,6 +182,7 @@ describe("compose: publish confirmation", () => {
     expect(publishCalls()[0][1]).toEqual({
       bodyMd: "re",
       replyToActorUrl: "https://m.example/users/bob",
+      replyToObjectUrl: null,
     });
     await vi.waitFor(() => expect(chip.hidden).toBe(true));
   });
